@@ -1,0 +1,85 @@
+# ============================================================================
+# Internal Prompts, Task Instructions & AI Agent Metadata (Local Only)
+# ============================================================================
+PROJECT_CONTEXT.md
+REQUIREMENTS.md
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+.agents/
+.freebuff/
+
+# ============================================================================
+# Secrets, Credentials & Environment Configurations
+# ============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+credentials.json
+token.json
+
+# ============================================================================
+# Python Virtual Environments & Distributions
+# ============================================================================
+.venv/
+venv/
+ENV/
+env/
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ============================================================================
+# Bytecode, Typecheck & Testing Caches
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ============================================================================
+# Pipeline Data Outputs, Exports & Logs
+# ============================================================================
+data/
+output/
+exports/
+*.xlsx
+*.csv
+*.parquet
+*.sqlite3
+*.db
+*.log
+logs/
+
+# ============================================================================
+# Browser Automation & Download Caches
+# ============================================================================
+.playwright/
+.crawl4ai/
+camoufox-cache/
+downloads/
+
+# ============================================================================
+# Operating System & IDE Artifacts
+# ============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
