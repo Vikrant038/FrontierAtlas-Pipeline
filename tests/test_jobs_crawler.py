@@ -81,6 +81,30 @@ def test_jobs_crawler_is_remote_derivation():
     assert JobsCrawler._is_remote("New York, NY, USA", ["python", "django"]) is False
     assert JobsCrawler._is_remote("London, UK") is False
 
+    # Case D: Location has no remote, but title explicitly states Remote -> True
+    assert JobsCrawler._is_remote(location="Germany", title="Staff AI Engineer - 2nd Horizon | Germany | Remote") is True
+    assert JobsCrawler._is_remote(location="Berlin, Germany", title="AI Specialist (Remote)") is True
+
+
+def test_jobs_crawler_keyword_word_boundary_filter():
+    # Arrange & Act & Assert
+    from src.crawlers.jobs_crawler import AI_KEYWORD_PATTERN
+
+    # Must match genuine AI / ML / LLM / Data Science roles
+    assert AI_KEYWORD_PATTERN.search("Staff AI Engineer - 2nd Horizon | Germany | Remote")
+    assert AI_KEYWORD_PATTERN.search("Machine Learning Engineer")
+    assert AI_KEYWORD_PATTERN.search("Senior Data Scientist")
+    assert AI_KEYWORD_PATTERN.search("LLM Alignment Specialist")
+    assert AI_KEYWORD_PATTERN.search("Deep Learning Researcher")
+    assert AI_KEYWORD_PATTERN.search("Software Engineer, ML Ops and Platform")
+
+    # Must reject false positive substrings containing 'ai' inside non-AI words
+    assert not AI_KEYWORD_PATTERN.search("Werkstudent (m/w/d) in Sustainable Finance")
+    assert not AI_KEYWORD_PATTERN.search("Claims Validation Handler")
+    assert not AI_KEYWORD_PATTERN.search("Campaigns & Content Specialist")
+    assert not AI_KEYWORD_PATTERN.search("Multi Skilled Maintenance Technician")
+    assert not AI_KEYWORD_PATTERN.search("Vehicle Detailer")
+
 
 @freeze_time("2026-09-04T12:00:00Z")
 @pytest.mark.asyncio
@@ -111,6 +135,24 @@ async def test_jobs_crawler_arbeitnow_ingestion():
                 "url": "https://arbeitnow.com/jobs/stale-102",
                 "remote": False,
                 "tags": ["ai"],
+            },
+            {
+                "slug": "non-ai-103",
+                "company_name": "Insurance Co",
+                "title": "Claims Validation Handler",
+                "created_at": now_epoch,
+                "url": "https://arbeitnow.com/jobs/non-ai-103",
+                "remote": False,
+            },
+            {
+                "slug": "grafana-remote-104",
+                "company_name": "Grafana Labs",
+                "title": "Staff AI Engineer - 2nd Horizon | Germany | Remote",
+                "created_at": now_epoch,
+                "url": "https://arbeitnow.com/jobs/grafana-remote-104",
+                "remote": False,
+                "location": "Germany",
+                "tags": ["R&D"],
             }
         ]
     }
@@ -123,7 +165,10 @@ async def test_jobs_crawler_arbeitnow_ingestion():
     await crawler.close()
 
     # Assert
-    assert len(jobs) == 1
+    assert len(jobs) == 2
     assert jobs[0].content.company == "OpenAI"
     assert jobs[0].content.role_family == RoleFamilyEnum.ENGINEERING
     assert jobs[0].content.is_remote is True
+
+    assert jobs[1].content.title == "Staff AI Engineer - 2nd Horizon | Germany | Remote"
+    assert jobs[1].content.is_remote is True
