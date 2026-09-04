@@ -29,7 +29,7 @@ from tenacity import (
 from src.config import settings
 from src.llm.chunker import chunk_to_budget
 from src.llm.rate_limiter import rate_limiter
-from src.schemas.entities import PricingModelEnum, RoleFamilyEnum
+from src.llm.rules import REMOTE_SIGNALS, classify_pricing_by_keywords, classify_role_family
 from src.utils.logger import logger
 
 T = TypeVar("T", bound=BaseModel)
@@ -151,62 +151,28 @@ class MultiTierLLMEngine:
             raise LLMTransientError(str(exc)) from exc
 
     def _deterministic_extract(self, raw_text: str, schema_cls: Type[BaseModel]) -> Dict[str, Any]:
-        """Tier 4: Zero-API rule-based regex and heuristic extractor."""
+        """Tier 4: Zero-API rule-based extractor delegating to shared classification rules."""
         logger.debug(f"Executing Tier 4 deterministic extractor for {schema_cls.__name__}")
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
         first_line = lines[0] if lines else "Untitled"
-        t_upper = raw_text.upper()
+        text_upper = raw_text.upper()
         data: Dict[str, Any] = {}
 
-        # 1. Summary field (NewsSummarySchema / NewsContent)
         if "summary" in schema_cls.model_fields:
             # Extract first 2-3 sentences as factual deterministic lead
             sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw_text) if len(s.strip()) > 15]
             lead_summary = " ".join(sentences[:3]) if sentences else (lines[1] if len(lines) > 1 else first_line)
             data["summary"] = lead_summary[:500] if lead_summary else None
 
-        # 2. Remote boolean field (JobExtractionSchema)
         if "is_remote" in schema_cls.model_fields:
-            remote_signals = ("REMOTE", "WORK FROM HOME", "ANYWHERE", "TELECOMMUTE", "WORLDWIDE")
-            data["is_remote"] = any(sig in t_upper for sig in remote_signals)
+            data["is_remote"] = any(sig.upper() in text_upper for sig in REMOTE_SIGNALS)
 
-        # 3. Role family field (JobExtractionSchema)
         if "role_family" in schema_cls.model_fields:
-            role = RoleFamilyEnum.OTHER
-            if re.search(r"research|scientist|phd", raw_text, re.I):
-                role = RoleFamilyEnum.RESEARCH
-            elif re.search(r"engineer|developer|architect|programmer|mlops|backend", raw_text, re.I):
-                role = RoleFamilyEnum.ENGINEERING
-            elif re.search(r"product|pm\b", raw_text, re.I):
-                role = RoleFamilyEnum.PRODUCT
-            elif re.search(r"design|ui|ux", raw_text, re.I):
-                role = RoleFamilyEnum.DESIGN
-            elif re.search(r"sales|bdr|sdr|account exec", raw_text, re.I):
-                role = RoleFamilyEnum.SALES
-            elif re.search(r"marketing|growth", raw_text, re.I):
-                role = RoleFamilyEnum.MARKETING
-            elif re.search(r"operations|ops|chief of staff", raw_text, re.I):
-                role = RoleFamilyEnum.OPERATIONS
-            data["role_family"] = role
+            data["role_family"] = classify_role_family(raw_text)
 
-        # 4. Pricing model field (ProductPricingSchema)
         if "pricingModel" in schema_cls.model_fields:
-            if any(w in t_upper for w in ("ENTERPRISE", "CONTACT SALES", "REQUEST DEMO", "CUSTOM PRICING")):
-                data["pricingModel"] = PricingModelEnum.ENTERPRISE
-            elif any(w in t_upper for w in ("$", "/MO", "/MONTH", "SUBSCRIPTION", "PER TOKEN", "PAY-AS-YOU-GO", "PAY AS YOU GO")):
-                data["pricingModel"] = PricingModelEnum.PAID
-            elif any(w in t_upper for w in ("OPEN SOURCE", "OPEN-SOURCE", "100% FREE", "FREE TOOL", "COMPLETELY FREE", "MIT LICENSE", "APACHE 2")):
-                data["pricingModel"] = PricingModelEnum.FREE
-            elif any(w in t_upper for w in ("FREEMIUM", "FREE TIER", "FREE TRIAL", "FREE PLAN", "FREE VERSION")):
-                data["pricingModel"] = PricingModelEnum.FREEMIUM
-            elif "GITHUB.COM" in t_upper or "HUGGINGFACE.CO" in t_upper:
-                data["pricingModel"] = PricingModelEnum.FREE
-            elif any(w in t_upper for w in ("API", "INFRASTRUCTURE", "HOSTED PLATFORM", "CLOUD SERVICE")):
-                data["pricingModel"] = PricingModelEnum.PAID
-            else:
-                data["pricingModel"] = PricingModelEnum.FREEMIUM
+            data["pricingModel"] = classify_pricing_by_keywords("", "", raw_text)
 
-        # Standard entity fields fallback
         if "title" in schema_cls.model_fields:
             data["title"] = first_line[:200]
         if "full_text" in schema_cls.model_fields:

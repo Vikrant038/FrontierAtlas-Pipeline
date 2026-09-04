@@ -7,6 +7,7 @@ import feedparser
 from src.crawlers.base import AsyncBaseCrawler
 from src.llm.fallback_chain import llm_engine
 from src.llm.prompts import JOB_EXTRACTION_PROMPT, JobExtractionSchema
+from src.llm.rules import ONSITE_SIGNALS, REMOTE_SIGNALS, classify_role_family
 from src.schemas.entities import JobContent, JobRecord, RoleFamilyEnum, SourceMetadata
 from src.resolution.normalizer import entity_resolver
 from src.utils.date_normalizer import infer_content_freshness
@@ -17,16 +18,6 @@ AI_KEYWORD_PATTERN = re.compile(
     r"\bai\b|machine learning|\bml\b|\bllm\b|data scien|deep learning",
     re.IGNORECASE,
 )
-
-ROLE_MAP = [
-    (RoleFamilyEnum.RESEARCH, re.compile(r"research|scientist|phd|postdoc", re.I)),
-    (RoleFamilyEnum.ENGINEERING, re.compile(r"engineer|developer|architect|programmer|mlops|backend", re.I)),
-    (RoleFamilyEnum.PRODUCT, re.compile(r"product|pm\b", re.I)),
-    (RoleFamilyEnum.DESIGN, re.compile(r"design|ui|ux", re.I)),
-    (RoleFamilyEnum.SALES, re.compile(r"sales|bdr|sdr|account exec", re.I)),
-    (RoleFamilyEnum.MARKETING, re.compile(r"marketing|growth", re.I)),
-    (RoleFamilyEnum.OPERATIONS, re.compile(r"operations|ops|chief of staff", re.I)),
-]
 
 
 class JobsCrawler(AsyncBaseCrawler):
@@ -43,18 +34,15 @@ class JobsCrawler(AsyncBaseCrawler):
         loc_str = (location or "").strip().lower()
         title_str = (title or "").lower()
         tag_str = " ".join(tags or []).lower()
-        if any(w in loc_str or w in tag_str or w in title_str for w in ("remote", "worldwide", "anywhere", "work from home", "telecommute")):
+        if any(w in loc_str or w in tag_str or w in title_str for w in REMOTE_SIGNALS):
             return True
-        if not loc_str and not any(w in title_str for w in ("onsite", "on-site", "in-person")):
+        if not loc_str and not any(w in title_str for w in ONSITE_SIGNALS):
             return True
         return False
 
     @staticmethod
     def _classify_role(title: str) -> RoleFamilyEnum:
-        for role, pattern in ROLE_MAP:
-            if pattern.search(title):
-                return role
-        return RoleFamilyEnum.OTHER
+        return classify_role_family(title)
 
     def _build_record(
         self,

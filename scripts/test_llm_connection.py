@@ -38,14 +38,20 @@ async def test_gemini(api_key: Optional[str] = None) -> bool:
     print(f"API Key: {key[:6]}...{key[-4:] if len(key) > 10 else ''}")
     t0 = time.monotonic()
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=key)
-        model = genai.GenerativeModel(settings.gemini_model, generation_config={"response_mime_type": "application/json"})
-        response = await model.generate_content_async(
-            'Return a JSON object with keys "status" ("ok") and "message" ("Gemini online").'
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=key)
+        response = await client.aio.models.generate_content(
+            model=settings.gemini_model,
+            contents='Return a JSON object with keys "status" ("ok") and "message" ("Gemini online").',
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
         )
         elapsed = time.monotonic() - t0
-        print(f"✅ Gemini 2.0 Flash responded in {elapsed:.2f}s:")
+        print(f"✅ {settings.gemini_model} responded in {elapsed:.2f}s:")
         print(f"   Raw text: {response.text.strip()}")
         data = json.loads(response.text)
         print(f"   Parsed JSON: {data}")

@@ -20,6 +20,8 @@ AGENTS.md
 *.cert
 credentials.json
 token.json
+service-account*.json
+*.json.key
 
 # ============================================================================
 # Python Virtual Environments & Distributions

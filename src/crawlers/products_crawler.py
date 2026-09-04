@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 from src.crawlers.base import TargetedCrawler
 from src.llm.fallback_chain import llm_engine
 from src.llm.prompts import PRODUCT_PRICING_PROMPT, ProductPricingSchema
+from src.llm.rules import classify_pricing_by_keywords
 from src.resolution.normalizer import entity_resolver, extract_domain
 from src.schemas.entities import PricingModelEnum, ProductContent, ProductRecord, SourceMetadata
 from src.utils.logger import logger
@@ -45,27 +46,11 @@ class ProductsCrawler(TargetedCrawler):
 
     @staticmethod
     def classify_pricing(name: str, url: str, desc: str) -> PricingModelEnum:
-        """Classify pricing model using keyword tiers, platform defaults, and overrides."""
+        """Classify pricing model using known-product overrides, then shared keyword tiers."""
         n = (name or "").lower().strip()
         if n in KNOWN_PRICING:
             return KNOWN_PRICING[n]
-
-        t = f"{name} {desc}".upper()
-        u = (url or "").lower()
-
-        if any(w in t for w in ("ENTERPRISE", "CONTACT SALES", "REQUEST DEMO", "CUSTOM PRICING")):
-            return PricingModelEnum.ENTERPRISE
-        if any(w in t for w in ("$", "/MO", "/MONTH", "SUBSCRIPTION", "PER TOKEN", "PAY-AS-YOU-GO", "PAY AS YOU GO")):
-            return PricingModelEnum.PAID
-        if any(w in t for w in ("OPEN SOURCE", "OPEN-SOURCE", "100% FREE", "FREE TOOL", "COMPLETELY FREE", "MIT LICENSE", "APACHE 2")):
-            return PricingModelEnum.FREE
-        if any(w in t for w in ("FREEMIUM", "FREE TIER", "FREE TRIAL", "FREE PLAN", "FREE VERSION")):
-            return PricingModelEnum.FREEMIUM
-        if "github.com" in u or "huggingface.co" in u:
-            return PricingModelEnum.FREE
-        if any(w in t for w in ("API", "INFRASTRUCTURE", "HOSTED PLATFORM", "CLOUD SERVICE")):
-            return PricingModelEnum.PAID
-        return PricingModelEnum.FREEMIUM
+        return classify_pricing_by_keywords(name, url, desc)
 
     async def classify_pricing_async(self, name: str, url: str, desc: str) -> PricingModelEnum:
         """Classify pricing model using LLM fallback when description is available (>=15 chars), falling back to keyword rules."""

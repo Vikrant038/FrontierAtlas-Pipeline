@@ -16,6 +16,7 @@ from src.crawlers.jobs_crawler import JobsCrawler
 from src.exporters.csv_exporter import CSVExporter
 from src.exporters.excel_exporter import ExcelExporter
 from src.exporters.graph_builder import KnowledgeGraphBuilder
+from src.exporters.sheets_exporter import GoogleSheetsExporter
 from src.resolution.normalizer import entity_resolver
 from src.utils.logger import setup_logging
 
@@ -28,11 +29,46 @@ async def _crawl(crawler_cls, **kwargs):
         return await crawler.crawl()
 
 
+def _handle_sheets_upload(
+    startups: list,
+    products: list,
+    papers: list,
+    jobs: list,
+    news: list,
+    logs: list,
+) -> None:
+    """Execute Google Sheets upload or display clear instructions if unconfigured."""
+    console.print("[yellow]Executing Deliverable 1: Uploading to Google Sheets...[/yellow]")
+    sheets_exporter = GoogleSheetsExporter()
+    if not sheets_exporter.is_configured():
+        console.print(
+            "[yellow]⚠️  Google Sheets export skipped: Service account credentials not found.\n"
+            "To enable Google Sheets upload:\n"
+            "  1. Place your Google Cloud service account JSON key in the project (e.g., credentials/service-account.json).\n"
+            "  2. Set GOOGLE_SERVICE_ACCOUNT_PATH=credentials/service-account.json in .env\n"
+            "  3. (Optional) Set EVALUATOR_EMAIL in .env to share viewer permissions automatically.\n"
+            "Pipeline continued successfully; Excel (.xlsx) and CSV exports are preserved.[/yellow]"
+        )
+        return
+
+    sheet_url = sheets_exporter.export(
+        startups=startups,
+        products=products,
+        papers=papers,
+        jobs=jobs,
+        news=news,
+        logs=logs,
+    )
+    if sheet_url:
+        console.print(f"[bold green]📊 Live Google Sheets URL: {sheet_url}[/bold green]")
+
+
 async def run_pipeline(
     run_phase1: bool = True,
     run_phase2: bool = True,
     target_count: int = 1000,
     output_xlsx: str = "exports/FrontierAtlas_Intelligence.xlsx",
+    upload_sheets: bool = False,
 ):
     """Execute async pipeline phases and export structured deliverables."""
     console.print("[bold blue]🚀 Launching FrontierAtlas AI Data Intelligence Pipeline...[/bold blue]")
@@ -113,6 +149,16 @@ async def run_pipeline(
     console.print(table)
     console.print(f"[bold green]✨ Multi-Tab Excel exported to: {output_xlsx}[/bold green]")
 
+    if upload_sheets:
+        _handle_sheets_upload(
+            startups=startups,
+            products=products,
+            papers=papers,
+            jobs=jobs,
+            news=news,
+            logs=logs,
+        )
+
 
 DEFAULT_OUTPUT_XLSX = "exports/FrontierAtlas_Intelligence.xlsx"
 PHASE1_OUTPUT_XLSX = "exports/phase1_test.xlsx"
@@ -122,14 +168,23 @@ PHASE1_OUTPUT_XLSX = "exports/phase1_test.xlsx"
 @click.option("--phase", type=click.Choice(["1", "2", "all"]), default="all", help="Phase to execute")
 @click.option("--target", type=int, default=1000, help="Target record count for Phase I")
 @click.option("--output", type=str, default=None, help="Output Excel path (default: phase1_test.xlsx for --phase 1, else FrontierAtlas_Intelligence.xlsx)")
-def main(phase: str, target: int, output: str):
+@click.option("--sheets", is_flag=True, default=False, help="Upload deliverables to Google Sheets (requires GOOGLE_SERVICE_ACCOUNT_PATH)")
+def main(phase: str, target: int, output: str, sheets: bool):
     """FrontierAtlas AI Intelligence Pipeline CLI."""
     setup_logging()
     run_phase1 = phase in ("1", "all")
     run_phase2 = phase in ("2", "all")
     # Default output aligns with scripts/verify_phase1.py expectations per phase.
     output_xlsx = output or (PHASE1_OUTPUT_XLSX if phase == "1" else DEFAULT_OUTPUT_XLSX)
-    asyncio.run(run_pipeline(run_phase1=run_phase1, run_phase2=run_phase2, target_count=target, output_xlsx=output_xlsx))
+    asyncio.run(
+        run_pipeline(
+            run_phase1=run_phase1,
+            run_phase2=run_phase2,
+            target_count=target,
+            output_xlsx=output_xlsx,
+            upload_sheets=sheets,
+        )
+    )
 
 
 if __name__ == "__main__":

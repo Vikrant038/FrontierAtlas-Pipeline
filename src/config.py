@@ -66,6 +66,17 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     export_directory: str = "exports"
 
+    # Google Sheets Deliverable Export (gspread)
+    google_service_account_path: Optional[str] = None
+    google_sheets_credentials_path: Optional[str] = None
+    google_sheets_spreadsheet_id: Optional[str] = None
+    evaluator_email: Optional[str] = None
+
+    @property
+    def effective_service_account_path(self) -> Optional[str]:
+        """Resolves active service account path, prioritizing GOOGLE_SERVICE_ACCOUNT_PATH."""
+        return self.google_service_account_path or self.google_sheets_credentials_path
+
 
 # Global singleton instance
 settings = Settings()
