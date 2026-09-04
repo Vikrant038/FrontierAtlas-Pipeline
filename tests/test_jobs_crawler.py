@@ -242,3 +242,45 @@ async def test_jobs_crawler_dateless_new_posting_novelty_stamped_once():
     assert len(jobs_first) == 1
     assert jobs_first[0].content.date == datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
     assert jobs_second == []
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+@respx.mock
+async def test_jobs_crawler_anti_bot_403_escalation():
+    # Arrange - Verify that JobsCrawler inherits full anti-bot TLS escalation on HTTP 403
+    import json
+    crawler = JobsCrawler()
+    respx.get("https://remoteok.com/api?tag=ai").mock(return_value=httpx.Response(403))
+
+    payload = [
+        {"legal": "Notice"},
+        {
+            "id": "201",
+            "company": "Anthropic",
+            "position": "AI Alignment Researcher",
+            "date": "2026-09-04T11:00:00Z",
+            "url": "https://remoteok.com/jobs/201",
+            "tags": ["ai", "remote"],
+            "location": "Remote",
+        },
+    ]
+    escalation_called = False
+
+    async def mock_fetch_tls(url, params=None, timeout=None):
+        nonlocal escalation_called
+        escalation_called = True
+        assert "remoteok" in url
+        return json.dumps(payload)
+
+    crawler.fetch_tls = mock_fetch_tls  # type: ignore[method-assign]
+
+    # Act
+    jobs = await crawler.fetch_remoteok()
+    await crawler.close()
+
+    # Assert
+    assert escalation_called is True
+    assert len(jobs) == 1
+    assert jobs[0].content.company == "Anthropic"
+    assert jobs[0].content.title == "AI Alignment Researcher"

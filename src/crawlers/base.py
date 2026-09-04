@@ -9,7 +9,8 @@ import json
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+import email.utils
 import feedparser
 import httpx
 from curl_cffi.requests import AsyncSession as CurlAsyncSession
@@ -65,15 +66,29 @@ _CRAWLER_RETRY = retry(
 
 
 async def _handle_retry_after(headers: Any, url: str) -> None:
-    """Inspect and sleep on HTTP 429 Retry-After header, capped at 30 seconds."""
+    """Inspect and sleep on HTTP 429 Retry-After header (seconds or RFC 7231 HTTP-date), capped at 30 seconds."""
     retry_after = headers.get("Retry-After") if headers else None
-    if retry_after:
+    if not retry_after:
+        return
+    wait_time: Optional[float] = None
+    try:
+        wait_time = float(retry_after)
+    except (ValueError, TypeError):
         try:
-            wait_time = min(float(retry_after), 30.0)
-            logger.warning(f"HTTP 429 for {url}. Sleeping {wait_time}s per Retry-After header.")
-            await asyncio.sleep(wait_time)
-        except ValueError:
-            pass
+            target_dt = email.utils.parsedate_to_datetime(str(retry_after))
+            if target_dt.tzinfo is None:
+                target_dt = target_dt.replace(tzinfo=timezone.utc)
+            now_dt = datetime.now(timezone.utc)
+            wait_time = (target_dt - now_dt).total_seconds()
+        except Exception as exc:
+            logger.debug(f"Could not parse Retry-After HTTP-date '{retry_after}': {exc}")
+
+    if wait_time is not None:
+        capped_wait = max(0.0, min(wait_time, 30.0))
+        logger.warning(
+            f"HTTP 429 for {url}. Sleeping {capped_wait:.1f}s per Retry-After header ('{retry_after}')."
+        )
+        await asyncio.sleep(capped_wait)
 
 
 class AsyncBaseCrawler(ABC):
@@ -93,6 +108,7 @@ class AsyncBaseCrawler(ABC):
         self.timeout = timeout_seconds or settings.default_request_timeout_seconds
         self.headers = headers or DEFAULT_HEADERS.copy()
         self._client: Optional[httpx.AsyncClient] = None
+        self._curl_session: Optional[CurlAsyncSession] = None
 
     async def get_client(self) -> httpx.AsyncClient:
         """Lazily initialize connection-pooled httpx async client."""
@@ -107,11 +123,24 @@ class AsyncBaseCrawler(ABC):
             )
         return self._client
 
+    async def get_curl_session(self) -> CurlAsyncSession:
+        """Lazily initialize connection-pooled curl-cffi async session."""
+        if self._curl_session is None or getattr(self._curl_session, "_closed", False):
+            self._curl_session = CurlAsyncSession(impersonate="chrome124")
+        return self._curl_session
+
     async def close(self) -> None:
-        """Gracefully close HTTP client connections."""
+        """Gracefully close HTTP and curl-cffi client connections."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
             logger.debug("AsyncBaseCrawler httpx client session closed.")
+        if self._curl_session is not None:
+            try:
+                await self._curl_session.close()
+            except Exception as exc:
+                logger.debug(f"Error closing curl-cffi session: {exc}")
+            self._curl_session = None
+            logger.debug("AsyncBaseCrawler curl-cffi session closed.")
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -154,6 +183,35 @@ class AsyncBaseCrawler(ABC):
                     raise net_err
                 raise TransientNetworkError(repr(net_err)) from net_err
 
+    async def _escalate_camoufox(
+        self,
+        url: str,
+        as_json: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Tier 3 fallback: Launch hardened headless browser to bypass Cloudflare/bot challenges."""
+        safe_url = validate_url_safe(url)
+        browser_timeout = float(timeout or 45.0)
+        logger.info(f"Escalating to Tier 3 Camoufox headless browser for {safe_url} (timeout={browser_timeout}s)")
+        try:
+            from camoufox.async_api import AsyncCamoufox
+
+            async def _run_camoufox():
+                async with AsyncCamoufox(headless=True, geoip=True) as browser:
+                    page = await browser.new_page()
+                    await page.goto(safe_url, timeout=int(browser_timeout * 1000))
+                    return await page.content()
+
+            content = await asyncio.wait_for(_run_camoufox(), timeout=browser_timeout + 15.0)
+            AsyncBaseCrawler.escalation_successes += 1
+            return json.loads(content) if as_json else content
+        except ImportError as imp_err:
+            logger.error(f"Camoufox not installed: {imp_err}")
+            raise BotBlockedError(f"Anti-bot block on {safe_url}, and Camoufox is not installed.") from imp_err
+        except Exception as exc:
+            logger.error(f"Camoufox browser tier failed for {safe_url}: {exc}")
+            raise BotBlockedError(f"Anti-bot block on {safe_url}, Camoufox failed: {exc}") from exc
+
     async def _escalate_tls(
         self,
         url: str,
@@ -161,12 +219,16 @@ class AsyncBaseCrawler(ABC):
         timeout: Optional[float] = None,
         as_json: bool = False,
     ) -> Any:
-        """Escalate an anti-bot 403 to curl-cffi TLS impersonation, returning text or parsed JSON."""
+        """Escalate an anti-bot 403 to curl-cffi TLS impersonation, falling back to Camoufox if blocked."""
         AsyncBaseCrawler.escalation_attempts += 1
         logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
-        res_raw = await self.fetch_tls(url, params=params, timeout=timeout)
-        AsyncBaseCrawler.escalation_successes += 1
-        return json.loads(res_raw) if as_json else res_raw
+        try:
+            res_raw = await self.fetch_tls(url, params=params, timeout=timeout)
+            AsyncBaseCrawler.escalation_successes += 1
+            return json.loads(res_raw) if as_json else res_raw
+        except BotBlockedError:
+            logger.warning(f"curl-cffi TLS impersonation blocked for {url}. Escalating to Tier 3 Camoufox.")
+            return await self._escalate_camoufox(url, as_json=as_json, timeout=timeout)
 
     async def fetch(
         self,
@@ -208,22 +270,22 @@ class AsyncBaseCrawler(ABC):
         params: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> str:
-        """Fetch using curl-cffi with Chrome124 TLS fingerprint impersonation."""
+        """Fetch using pooled curl-cffi with Chrome124 TLS fingerprint impersonation."""
         safe_url = validate_url_safe(url)
         req_timeout = int(timeout or self.timeout)
         async with self.semaphore:
             try:
-                async with CurlAsyncSession(impersonate="chrome124") as curl_session:
-                    resp = await curl_session.get(
-                        safe_url, params=params, headers=self.headers, timeout=req_timeout
-                    )
-                    if resp.status_code == 403:
-                        raise BotBlockedError(f"curl-cffi HTTP 403 for {safe_url}")
-                    if resp.status_code in (429, 500, 502, 503, 504):
-                        if resp.status_code == 429:
-                            await _handle_retry_after(resp.headers, safe_url)
-                        raise TransientNetworkError(f"curl-cffi HTTP {resp.status_code}")
-                    return resp.text
+                curl_session = await self.get_curl_session()
+                resp = await curl_session.get(
+                    safe_url, params=params, headers=self.headers, timeout=req_timeout
+                )
+                if resp.status_code == 403:
+                    raise BotBlockedError(f"curl-cffi HTTP 403 for {safe_url}")
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    if resp.status_code == 429:
+                        await _handle_retry_after(resp.headers, safe_url)
+                    raise TransientNetworkError(f"curl-cffi HTTP {resp.status_code}")
+                return resp.text
             except (BotBlockedError, TransientNetworkError):
                 raise
             except Exception as exc:

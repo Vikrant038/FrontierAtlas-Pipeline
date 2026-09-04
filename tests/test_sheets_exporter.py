@@ -205,3 +205,74 @@ def test_explicit_spreadsheet_id_failure_raises_no_stray_creation(mocker, tmp_pa
     with pytest.raises(Exception, match="Not found"):
         exporter.get_or_create_spreadsheet(mock_client, title="Fallback Title")
     mock_client.create.assert_not_called()
+
+
+def test_transient_sheets_error_detection():
+    # Arrange
+    from src.exporters.sheets_exporter import _is_transient_sheets_error
+    import gspread
+
+    class FakeResponse:
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+            self.text = f"HTTP {status_code}"
+
+    # Act & Assert
+    # 429 Rate limit
+    api_err_429 = gspread.exceptions.APIError(FakeResponse(429))
+    assert _is_transient_sheets_error(api_err_429) is True
+
+    # 503 Service Unavailable
+    api_err_503 = gspread.exceptions.APIError(FakeResponse(503))
+    assert _is_transient_sheets_error(api_err_503) is True
+
+    # Storage quota (403) must NOT be considered transient
+    api_err_storage = gspread.exceptions.APIError(FakeResponse(403))
+    api_err_storage.args = ("The user's Drive storage quota has been exceeded.",)
+    assert _is_transient_sheets_error(api_err_storage) is False
+
+    # Network disconnect
+    assert _is_transient_sheets_error(ConnectionError("Broken pipe")) is True
+
+    # Non-transient standard error
+    assert _is_transient_sheets_error(ValueError("Bad value")) is False
+
+
+def test_execute_values_update_retries_on_transient_error(tmp_path, monkeypatch):
+    # Arrange
+    from tenacity import wait_none
+    import src.exporters.sheets_exporter as se
+    import gspread
+
+    class FakeResponse:
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+            self.text = "Rate limit"
+
+    exporter = GoogleSheetsExporter(service_account_path=str(tmp_path / "fake.json"))
+    mock_spreadsheet = MagicMock()
+
+    # Fast retry in test: override wait strategy to wait_none
+    monkeypatch.setattr(exporter._execute_values_update.retry, "wait", wait_none())
+
+    call_count = 0
+
+    def flaky_update(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise gspread.exceptions.APIError(FakeResponse(429))
+        return {"updatedCells": 10}
+
+    mock_spreadsheet.values_update.side_effect = flaky_update
+
+    # Act
+    exporter._execute_values_update(
+        spreadsheet=mock_spreadsheet,
+        cell_range="'Startups'!A1",
+        values=[["col1", "col2"]],
+    )
+
+    # Assert - called twice, succeeded on 2nd attempt
+    assert call_count == 2
+    assert mock_spreadsheet.values_update.call_count == 2

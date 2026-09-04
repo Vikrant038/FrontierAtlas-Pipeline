@@ -8,6 +8,12 @@ idempotent tab management, and evaluator sharing.
 import os
 from typing import Any, Dict, List, Optional
 import gspread
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from src.config import settings
 from src.exporters.base import ENTITY_SPECS
@@ -24,6 +30,31 @@ from src.utils.logger import logger
 
 BATCH_SIZE = 500
 DEFAULT_SPREADSHEET_TITLE = "FrontierAtlas AI Intelligence"
+
+
+def _is_transient_sheets_error(exc: BaseException) -> bool:
+    """Check if an exception represents a transient Google API rate limit (429) or server error (500/503)."""
+    msg = str(exc).lower()
+    if "storage quota" in msg:
+        return False
+    if isinstance(exc, gspread.exceptions.APIError):
+        resp = getattr(exc, "response", None)
+        status = getattr(resp, "status_code", None)
+        if status in (429, 500, 502, 503, 504):
+            return True
+        if any(term in msg for term in ["429", "rate limit", "quota exceeded", "500", "502", "503", "unavailable"]):
+            return True
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    return False
+
+
+_SHEETS_RETRY = retry(
+    wait=wait_exponential_jitter(initial=1.0, max=20.0, exp_base=2, jitter=2.0),
+    stop=stop_after_attempt(5),
+    retry=retry_if_exception(_is_transient_sheets_error),
+    reraise=True,
+)
 
 
 class GoogleSheetsExporter:
@@ -82,6 +113,7 @@ class GoogleSheetsExporter:
                 logger.debug(f"Could not read service account email from {self.service_account_path}: {exc}")
         return "your-service-account@...iam.gserviceaccount.com"
 
+    @_SHEETS_RETRY
     def get_or_create_spreadsheet(
         self,
         client: gspread.Client,
@@ -111,6 +143,7 @@ class GoogleSheetsExporter:
                 )
             raise
 
+    @_SHEETS_RETRY
     def _prepare_worksheet(
         self,
         spreadsheet: gspread.Spreadsheet,
@@ -142,6 +175,20 @@ class GoogleSheetsExporter:
             ws.resize(rows=max(num_rows, 100), cols=max(num_cols, 10))
             return ws
 
+    @_SHEETS_RETRY
+    def _execute_values_update(
+        self,
+        spreadsheet: gspread.Spreadsheet,
+        cell_range: str,
+        values: List[List[Any]],
+    ) -> None:
+        """Execute values_update with exponential backoff on transient errors."""
+        spreadsheet.values_update(
+            cell_range,
+            params={"valueInputOption": "USER_ENTERED"},
+            body={"values": values},
+        )
+
     def _batch_update_values(
         self,
         spreadsheet: gspread.Spreadsheet,
@@ -153,10 +200,10 @@ class GoogleSheetsExporter:
             chunk = all_rows[i : i + BATCH_SIZE]
             start_row = i + 1
             cell_range = f"'{title}'!A{start_row}"
-            spreadsheet.values_update(
-                cell_range,
-                params={"valueInputOption": "USER_ENTERED"},
-                body={"values": chunk},
+            self._execute_values_update(
+                spreadsheet=spreadsheet,
+                cell_range=cell_range,
+                values=chunk,
             )
         logger.info(f"Uploaded {len(all_rows) - 1} records to tab '{title}' in {len(all_rows) // BATCH_SIZE + 1} batch(es).")
 
