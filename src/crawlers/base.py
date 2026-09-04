@@ -118,7 +118,7 @@ class AsyncBaseCrawler(ABC):
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Core HTTP request with SSRF validation, semaphore bounds, and retry backoff."""
-        safe_url = validate_url_safe(url)
+        safe_url = await asyncio.to_thread(validate_url_safe, url)
         client = await self.get_client()
         req_headers = {**self.headers, **(headers or {})}
         req_timeout = timeout if timeout is not None else self.timeout
