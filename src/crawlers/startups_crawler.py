@@ -1,7 +1,6 @@
-from typing import List, Optional
+from typing import AsyncIterator, List, Optional
 
-from src.config import settings
-from src.crawlers.base import TargetedCrawler
+from src.crawlers.base import TargetedCrawler, github_headers
 from src.schemas.entities import SourceMetadata, StartupContent, StartupContentData, StartupRecord
 from src.resolution.normalizer import entity_resolver
 from src.utils.logger import logger
@@ -31,7 +30,6 @@ class StartupsCrawler(TargetedCrawler):
 
     def __init__(self, target_count: int = 1000, **kwargs):
         super().__init__(target_count=target_count, **kwargs)
-        self.github_token = settings.github_token
 
     def _add_startup(
         self, raw_name: Optional[str], src_name: str, src_url: str, employee_count: Optional[int] = None
@@ -47,81 +45,75 @@ class StartupsCrawler(TargetedCrawler):
             ),
         )
 
-    def _harvest_seeds(self) -> None:
-        """Harvest foundational AI startups with zero fabricated employee counts."""
-        for raw_name, url in self.CANONICAL_SEEDS:
-            if self._add_startup(raw_name, "Canonical Seed List (Internal)", url, employee_count=None):
-                break
-
-    async def _harvest_yc(self) -> None:
-        """Harvest Y Combinator AI companies with authentic teamSize metadata."""
+    async def _yc_candidates(self) -> AsyncIterator[tuple]:
+        """Yield (name, source, url, employee_count) candidates from Y Combinator pages."""
         for page in range(1, 25):
-            if self.is_full:
-                break
             try:
                 data = await self.fetch_json(f"{self.YC_API_URL}&page={page}")
-                companies = (data or {}).get("companies", [])
-                if not companies:
-                    break
-                for c in companies:
-                    name = c.get("name")
-                    url = c.get("website") or c.get("url") or f"https://www.ycombinator.com/companies/{c.get('slug', '')}"
-                    team_size = c.get("teamSize")
-                    emp_count = team_size if (isinstance(team_size, int) and team_size >= 1) else None
-                    if self._add_startup(name, "Y Combinator", url, employee_count=emp_count):
-                        return
             except Exception as exc:
                 logger.warning(f"Error fetching YC companies (page {page}): {exc}")
-                break
+                return
+            companies = (data or {}).get("companies", [])
+            if not companies:
+                return
+            for c in companies:
+                team_size = c.get("teamSize")
+                yield (
+                    c.get("name"),
+                    "Y Combinator",
+                    c.get("website") or c.get("url") or f"https://www.ycombinator.com/companies/{c.get('slug', '')}",
+                    team_size if isinstance(team_size, int) and team_size >= 1 else None,
+                )
 
-    async def _harvest_hf(self) -> None:
-        """Harvest leading AI organizations from Hugging Face model creators."""
+    async def _hf_candidates(self) -> AsyncIterator[tuple]:
+        """Yield (name, source, url, employee_count) candidates from Hugging Face model orgs."""
         try:
             hf_models = await self.fetch_json(self.HF_MODELS_API)
-            for m in (hf_models or []):
-                if "/" in m.get("id", ""):
-                    org = m["id"].split("/")[0]
-                    if self._add_startup(org, "Hugging Face", f"https://huggingface.co/{org}"):
-                        return
         except Exception as exc:
             logger.warning(f"Error fetching HF models orgs: {exc}")
+            return
+        for m in (hf_models or []):
+            if "/" in m.get("id", ""):
+                org = m["id"].split("/")[0]
+                yield org, "Hugging Face", f"https://huggingface.co/{org}", None
 
-    async def _harvest_github(self) -> None:
-        """Harvest AI organizations from GitHub search API."""
-        headers = {"Accept": "application/vnd.github+json"}
-        if self.github_token:
-            headers["Authorization"] = f"Bearer {self.github_token}"
-
+    async def _github_candidates(self) -> AsyncIterator[tuple]:
+        """Yield (name, source, url, employee_count) candidates from GitHub AI org search."""
         for query in self.SEARCH_QUERIES:
             for page in range(1, 11):
-                if self.is_full:
-                    return
                 try:
                     data = await self.fetch_json(
                         self.GITHUB_USERS_API,
                         params={"q": query, "per_page": 100, "page": page},
-                        headers=headers,
+                        headers=github_headers(self.github_token),
                     )
-                    items = (data or {}).get("items", [])
-                    if not items:
-                        break
-                    for item in items:
-                        if self._add_startup(item.get("login"), "GitHub AI Orgs", item.get("html_url", "")):
-                            return
                 except Exception as exc:
                     logger.warning(f"Error fetching GitHub orgs for '{query}': {exc}")
                     break
+                items = (data or {}).get("items", [])
+                if not items:
+                    break
+                for item in items:
+                    yield item.get("login"), "GitHub AI Orgs", item.get("html_url", ""), None
+
+    async def _harvest_candidates(self, candidates: AsyncIterator[tuple]) -> None:
+        """Add startup candidates until the target quota is reached."""
+        async for raw_name, src_name, src_url, emp in candidates:
+            if self._add_startup(raw_name, src_name, src_url, employee_count=emp):
+                return
 
     async def crawl(self) -> List[StartupRecord]:
         """Execute multi-source AI startups collection up to target count."""
         logger.info(f"Starting StartupsCrawler (Target: {self.target_count})...")
-        self._harvest_seeds()
+        for raw_name, url in self.CANONICAL_SEEDS:
+            if self._add_startup(raw_name, "Canonical Seed List (Internal)", url):
+                break
         if not self.is_full:
-            await self._harvest_yc()
+            await self._harvest_candidates(self._yc_candidates())
         if not self.is_full:
-            await self._harvest_hf()
+            await self._harvest_candidates(self._hf_candidates())
         if not self.is_full:
-            await self._harvest_github()
+            await self._harvest_candidates(self._github_candidates())
         logger.info(f"Completed StartupsCrawler: {len(self.collected)} startups collected.")
         return self.collected[:self.target_count]
 

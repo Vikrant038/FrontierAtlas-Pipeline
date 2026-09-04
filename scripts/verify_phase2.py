@@ -14,6 +14,7 @@ Usage:
 
 import asyncio
 import csv
+import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -25,9 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 from curl_cffi.requests import Session as CurlSession
-from dateutil import parser as dateutil_parser
 
 from src.exporters.base import ENTITY_SPECS
+from src.utils.date_normalizer import parse_datetime_to_utc
 
 DEFAULT_JOBS_PATH = Path("exports/jobs.csv")
 DEFAULT_NEWS_PATH = Path("exports/news.csv")
@@ -60,15 +61,22 @@ def load_csv_rows(filepath: Path) -> Tuple[List[str], List[Dict[str, str]]]:
         return headers, list(dict_reader)
 
 
-def parse_utc_dt(raw: Optional[str]) -> Optional[datetime]:
-    """Parse ISO date string into UTC datetime."""
-    if not raw:
-        return None
-    try:
-        dt = dateutil_parser.parse(raw.strip())
-        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
-    except Exception:
-        return None
+def audit_freshness(rows: List[Dict[str, str]], date_header: str) -> Tuple[int, List[Tuple[int, str, str]]]:
+    """Assert every record's publication date is within 24h of its collectedAt timestamp."""
+    fresh_count = 0
+    stale_records = []
+    for idx, row in enumerate(rows, start=1):
+        dt_pub = parse_datetime_to_utc(row.get(date_header))
+        dt_col = parse_datetime_to_utc(row.get("collectedAt"))
+        if not dt_pub or not dt_col:
+            stale_records.append((idx, row.get("source.url"), "Unparseable timestamp"))
+            continue
+        age_hours = (dt_col - dt_pub).total_seconds() / 3600.0
+        if -0.08 <= age_hours <= 24.0:
+            fresh_count += 1
+        else:
+            stale_records.append((idx, row.get("source.url"), f"{age_hours:.2f}h old"))
+    return fresh_count, stale_records
 
 
 async def probe_url(client: httpx.AsyncClient, sem: asyncio.Semaphore, url: str) -> Tuple[str, int, str]:
@@ -177,33 +185,8 @@ def main() -> None:
 
     # 3. 24-Hour Freshness Audit
     print("--- 3. 24-Hour Freshness Guarantee Audit ---")
-    fresh_jobs = 0
-    stale_jobs = []
-    for idx, r in enumerate(jobs_rows, start=1):
-        dt_post = parse_utc_dt(r.get("content.date"))
-        dt_col = parse_utc_dt(r.get("collectedAt"))
-        if not dt_post or not dt_col:
-            stale_jobs.append((idx, r.get("source.url"), "Unparseable timestamp"))
-            continue
-        age_hours = (dt_col - dt_post).total_seconds() / 3600.0
-        if -0.08 <= age_hours <= 24.0:
-            fresh_jobs += 1
-        else:
-            stale_jobs.append((idx, r.get("source.url"), f"{age_hours:.2f}h old"))
-
-    fresh_news = 0
-    stale_news = []
-    for idx, r in enumerate(news_rows, start=1):
-        dt_pub = parse_utc_dt(r.get("content.published_date"))
-        dt_col = parse_utc_dt(r.get("collectedAt"))
-        if not dt_pub or not dt_col:
-            stale_news.append((idx, r.get("source.url"), "Unparseable timestamp"))
-            continue
-        age_hours = (dt_col - dt_pub).total_seconds() / 3600.0
-        if -0.08 <= age_hours <= 24.0:
-            fresh_news += 1
-        else:
-            stale_news.append((idx, r.get("source.url"), f"{age_hours:.2f}h old"))
+    fresh_jobs, stale_jobs = audit_freshness(jobs_rows, "content.date")
+    fresh_news, stale_news = audit_freshness(news_rows, "content.published_date")
 
     total_records = len(jobs_rows) + len(news_rows)
     total_fresh = fresh_jobs + fresh_news
@@ -254,10 +237,32 @@ def main() -> None:
         print("  ✅ URL Liveness Threshold Satisfied (>= 95.0% live, <= 3 paywalls tolerated).")
     print()
 
-    # 5. Final Decision
+    # 5. AI Relevance Keyword Audit on Job Titles
+    print("--- 5. AI Relevance Keyword Audit on Job Titles ---")
+    ai_title_pattern = re.compile(
+        r"\bai\b|machine learning|\bml\b|\bllm\b|data scien|deep learning",
+        re.IGNORECASE,
+    )
+    non_ai_jobs = []
+    for idx, r in enumerate(jobs_rows, start=1):
+        title = r.get("content.title", "")
+        if not ai_title_pattern.search(title):
+            non_ai_jobs.append((idx, r.get("source.name", ""), title))
+
+    if non_ai_jobs:
+        print(f"  ❌ AI Keyword Check Failed: {len(non_ai_jobs)}/{len(jobs_rows)} job titles lack valid AI keywords:")
+        for idx, src, title in non_ai_jobs[:10]:
+            print(f"    • Job #{idx} ({src}): '{title}'")
+        all_passed = False
+    else:
+        print(f"  AI Title Pattern Compliance: {len(jobs_rows)}/{len(jobs_rows)} valid AI titles (✅ 100%)")
+        print("  ✅ 0 Non-AI job titles detected. All listings match strict AI word-boundary pattern.")
+    print()
+
+    # 6. Final Decision
     print("=" * 75)
     if all_passed:
-        print("✅ PHASE II AUDIT PASSED: 100% Freshness, Schema Conformant, Live URLs Verified.")
+        print("✅ PHASE II AUDIT PASSED: 100% Freshness, Schema Conformant, Live URLs Verified, 100% AI Titles.")
         print("=" * 75)
         sys.exit(0)
     else:

@@ -194,6 +194,50 @@ async def test_news_crawler_title_fuzzy_deduplication():
 @freeze_time("2026-09-04T12:00:00Z")
 @pytest.mark.asyncio
 @respx.mock
+async def test_news_crawler_title_fuzzy_dedup_paren_publisher_suffix():
+    # Arrange - same story where one feed wraps publisher in parens (both dedupe layers miss 85% raw score)
+    rss_f1 = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>TechCrunch Feed</title>
+<item>
+  <title>Nvidia acquires Hugging Face</title>
+  <link>https://techcrunch.com/story-p</link>
+  <pubDate>Fri, 04 Sep 2026 11:00:00 GMT</pubDate>
+  <description>Nvidia announced acquisition.</description>
+</item>
+</channel></rss>"""
+
+    rss_f2 = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Verge Feed</title>
+<item>
+  <title>Nvidia acquires Hugging Face (The Verge)</title>
+  <link>https://theverge.com/story-p</link>
+  <pubDate>Fri, 04 Sep 2026 11:20:00 GMT</pubDate>
+  <description>Verge coverage of same announcement.</description>
+</item>
+</channel></rss>"""
+
+    crawler = NewsCrawler(sources=[
+        {"name": "TC", "feed_url": "https://techcrunch.com/feed.xml"},
+        {"name": "Verge", "feed_url": "https://theverge.com/feed.xml"},
+    ])
+    respx.get("https://techcrunch.com/feed.xml").mock(return_value=httpx.Response(200, text=rss_f1))
+    respx.get("https://theverge.com/feed.xml").mock(return_value=httpx.Response(200, text=rss_f2))
+    respx.get("https://techcrunch.com/story-p").mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
+    respx.get("https://theverge.com/story-p").mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
+
+    # Act
+    articles = await crawler.crawl()
+    await crawler.close()
+
+    # Assert - paren-wrapped publisher suffix stripped before fuzzy match; short-title
+    # variant scores 85% raw (below 90 cutoff) and only dedupes after suffix strip
+    assert len(articles) == 1
+    assert articles[0].content.title == "Nvidia acquires Hugging Face"
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+@respx.mock
 async def test_news_crawler_full_text_fallback_quality():
     # Arrange
     rss_xml = """<?xml version="1.0" encoding="UTF-8"?>

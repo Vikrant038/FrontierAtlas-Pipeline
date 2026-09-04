@@ -1,6 +1,7 @@
 import asyncio
 import re
 import unicodedata
+from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any, Dict, List, Optional
 from rapidfuzz import fuzz, process
@@ -8,6 +9,8 @@ from rapidfuzz import fuzz, process
 from src.crawlers.base import AsyncBaseCrawler
 from src.llm.chunker import clean_html_text
 from src.schemas.entities import NewsContent, NewsRecord, SourceMetadata
+from src.utils.date_normalizer import extract_date_from_html, infer_content_freshness
+from src.utils.run_state import load_seen_keys, save_seen_keys
 from src.utils.logger import logger
 
 NEWS_SOURCES = [
@@ -30,6 +33,9 @@ class NewsCrawler(AsyncBaseCrawler):
         self.stats: Dict[str, Dict[str, int]] = {
             s["name"]: {"total": 0, "full_text": 0} for s in self.sources
         }
+        # Keys collected in the PREVIOUS run: cross-run novelty heuristic state.
+        self._prev_run_urls = load_seen_keys("news")
+        self._novelty_keys: set = set()
 
     @staticmethod
     def _normalize_url(url: str) -> str:
@@ -73,10 +79,6 @@ class NewsCrawler(AsyncBaseCrawler):
         if not title or not link or "news.ycombinator.com" in link:
             return None
 
-        pub_date = self.check_freshness(getattr(entry, "published", None) or getattr(entry, "updated", None))
-        if not pub_date:
-            return None
-
         norm_url = self._normalize_url(link)
         if norm_url in self._seen_urls:
             return None
@@ -88,11 +90,14 @@ class NewsCrawler(AsyncBaseCrawler):
                 logger.info(f"Duplicate news title skipped: '{title}' ({match[1]:.1f}% match with '{match[0]}')")
                 return None
 
+        # Reserve dedup keys synchronously BEFORE awaiting the fetch: concurrent
+        # gather tasks would otherwise both pass the membership check (add-after-await race).
         self._seen_urls.add(norm_url)
         self._seen_titles.append(norm_title)
 
         full_text = ""
         is_full_text = False
+        raw_html = ""
         try:
             raw_html = await self.fetch(link)
             cleaned = clean_html_text(raw_html)
@@ -101,6 +106,30 @@ class NewsCrawler(AsyncBaseCrawler):
                 is_full_text = True
         except Exception as exc:
             logger.debug(f"Full-text fetch failed for {link}: {exc}")
+
+        # Freshness gate: strict feed date, then HTML metadata, then text inference,
+        # then cross-run novelty (unseen since last run = new; previously seen = old).
+        pub_date = self.check_freshness(getattr(entry, "published", None) or getattr(entry, "updated", None))
+        date_inferred = False
+        if not pub_date:
+            pub_date = self.check_freshness(extract_date_from_html(raw_html, page_url=link))
+            date_inferred = pub_date is not None
+        if not pub_date and full_text:
+            pub_date = self.check_freshness(infer_content_freshness(full_text))
+            date_inferred = pub_date is not None
+        if not pub_date:
+            if norm_url in self._prev_run_urls:
+                # Seen in a previous run and no fresh-date signal: not new, reject.
+                self._seen_urls.discard(norm_url)
+                if norm_title in self._seen_titles:
+                    self._seen_titles.remove(norm_title)
+                return None
+            # Never seen before: treat as new since last run, stamp collection time.
+            pub_date = datetime.now(timezone.utc)
+            date_inferred = True
+            logger.debug(f"Dateless entry treated as new-since-last-run: '{title}' ({source_name}).")
+        if date_inferred:
+            logger.debug(f"Publication date inferred heuristically for '{title}' ({source_name}).")
 
         if source_name in self.stats:
             self.stats[source_name]["total"] += 1
@@ -128,6 +157,10 @@ class NewsCrawler(AsyncBaseCrawler):
         logger.info(f"Starting NewsCrawler across {len(self.sources)} sources...")
         results = await asyncio.gather(*[self.crawl_source(s) for s in self.sources])
         records = [rec for sublist in results for rec in sublist]
+
+        # Persist this run's keys for the next run's novelty heuristic.
+        self._novelty_keys.update(self._seen_urls)
+        save_seen_keys("news", self._novelty_keys)
 
         # Post-gather title deduplication pass ensuring zero duplicate pairs
         deduped_records: List[NewsRecord] = []

@@ -1,15 +1,18 @@
 import asyncio
 import re
+from datetime import datetime, timezone
 from typing import Any, List, Optional
 import feedparser
 
 from src.crawlers.base import AsyncBaseCrawler
 from src.schemas.entities import JobContent, JobRecord, RoleFamilyEnum, SourceMetadata
 from src.resolution.normalizer import entity_resolver
+from src.utils.date_normalizer import infer_content_freshness
 from src.utils.logger import logger
+from src.utils.run_state import load_seen_keys, save_seen_keys
 
 AI_KEYWORD_PATTERN = re.compile(
-    r"\b(ai|ml|llm)\b|machine learning|data scien|deep learning",
+    r"\bai\b|machine learning|\bml\b|\bllm\b|data scien|deep learning",
     re.IGNORECASE,
 )
 
@@ -21,21 +24,24 @@ ROLE_MAP = [
     (RoleFamilyEnum.SALES, re.compile(r"sales|bdr|sdr|account exec", re.I)),
     (RoleFamilyEnum.MARKETING, re.compile(r"marketing|growth", re.I)),
     (RoleFamilyEnum.OPERATIONS, re.compile(r"operations|ops|chief of staff", re.I)),
-    (RoleFamilyEnum.LEGAL, re.compile(r"legal|counsel", re.I)),
-    (RoleFamilyEnum.FINANCE, re.compile(r"finance|accountant|cfo", re.I)),
 ]
 
 
 class JobsCrawler(AsyncBaseCrawler):
     """Crawler for ingesting fresh (<24h) AI job postings across 5 AI job boards."""
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Keys collected in the PREVIOUS run: cross-run novelty heuristic state.
+        self._prev_run_urls = load_seen_keys("jobs")
+        self._novelty_keys: set = set()
+
     @staticmethod
     def _is_remote(location: str = "", tags: Optional[List[str]] = None, title: str = "") -> bool:
         loc_str = (location or "").strip().lower()
+        title_str = (title or "").lower()
         tag_str = " ".join(tags or []).lower()
-        title_str = (title or "").strip().lower()
-        remote_signals = ("remote", "worldwide", "anywhere", "work from home")
-        if any(w in loc_str or w in tag_str or w in title_str for w in remote_signals):
+        if any(w in loc_str or w in tag_str or w in title_str for w in ("remote", "worldwide", "anywhere", "work from home", "telecommute")):
             return True
         if not loc_str and not any(w in title_str for w in ("onsite", "on-site", "in-person")):
             return True
@@ -49,9 +55,21 @@ class JobsCrawler(AsyncBaseCrawler):
         return RoleFamilyEnum.OTHER
 
     def _build_record(self, raw_company: str, title: str, raw_date: Any, url: str, source_name: str, remote: bool) -> Optional[JobRecord]:
+        # Freshness gate: strict posting date, then text inference, then cross-run novelty for dateless entries.
         pub_date = self.check_freshness(raw_date)
-        if not pub_date:
+        if not pub_date and raw_date:
+            # Explicit date was provided but failed 24h freshness check -> strictly stale!
             return None
+        if not pub_date:
+            pub_date = self.check_freshness(infer_content_freshness(title))
+        if not pub_date:
+            norm_url = (url or "").strip()
+            if not norm_url or norm_url in self._prev_run_urls:
+                return None
+            # Truly dateless posting never seen before: stamp collection time.
+            pub_date = datetime.now(timezone.utc)
+            self._novelty_keys.add(norm_url)
+            logger.debug(f"Dateless posting treated as new-since-last-run: '{title}' ({source_name}).")
         canonical, _ = entity_resolver.resolve(raw_name=raw_company, source_url=url, entity_type="STARTUP")
         return JobRecord(
             source=SourceMetadata(name=source_name, url=url),
@@ -62,18 +80,19 @@ class JobsCrawler(AsyncBaseCrawler):
         records: List[JobRecord] = []
         try:
             client = await self.get_client()
-            for url in ("https://remoteok.com/api?tag=ai", "https://remoteok.com/api"):
-                resp = await client.get(url, headers=self.headers)
-                logger.info(f"[RemoteOK] Raw response status: {resp.status_code}, length: {len(resp.text)} bytes ({url})")
-                if resp.status_code != 200:
-                    continue
+            url = "https://remoteok.com/api?tag=ai"
+            resp = await client.get(url, headers=self.headers)
+            logger.info(f"[RemoteOK] Raw response status: {resp.status_code}, length: {len(resp.text)} bytes ({url})")
+            if resp.status_code == 200:
                 items = resp.json()
                 items = items[1:] if isinstance(items, list) and items and "legal" in str(items[0]) else (items or [])
+                survived_filter = 0
                 for item in items:
-                    pos = item.get("position") or "AI Specialist"
-                    tags = item.get("tags") or []
-                    if not (AI_KEYWORD_PATTERN.search(pos) or "ai" in tags):
+                    pos = item.get("position") or ""
+                    if not AI_KEYWORD_PATTERN.search(pos):
                         continue
+                    survived_filter += 1
+                    tags = item.get("tags") or []
                     loc = f"{item.get('location', '')} {item.get('region', '')}"
                     is_remote = self._is_remote(location=loc, tags=tags, title=pos)
                     rec = self._build_record(
@@ -86,8 +105,7 @@ class JobsCrawler(AsyncBaseCrawler):
                     )
                     if rec:
                         records.append(rec)
-                if records:
-                    break
+                logger.info(f"[RemoteOK] Total items: {len(items)}, survived AI title filter: {survived_filter}, fresh (<24h): {len(records)}")
         except Exception as exc:
             logger.warning(f"RemoteOK fetch error: {exc}")
         return records
@@ -194,11 +212,14 @@ class JobsCrawler(AsyncBaseCrawler):
             client = await self.get_client()
             for url in urls:
                 resp = await client.get(url, headers=self.headers)
-                logger.info(f"[WeWorkRemotely] Raw response status: {resp.status_code}, length: {len(resp.text)} bytes ({url})")
                 if resp.status_code != 200:
+                    logger.info(f"[WeWorkRemotely] {url} -> status: {resp.status_code}")
                     continue
                 feed = feedparser.parse(resp.text)
-                for entry in feed.entries:
+                entries = getattr(feed, "entries", [])
+                survived_ai_filter = 0
+                fresh_count = 0
+                for entry in entries:
                     link = getattr(entry, "link", "")
                     if not link or link in seen_urls:
                         continue
@@ -210,6 +231,7 @@ class JobsCrawler(AsyncBaseCrawler):
                         title = raw_title
                     if not AI_KEYWORD_PATTERN.search(title):
                         continue
+                    survived_ai_filter += 1
                     is_remote = self._is_remote(location=getattr(entry, "location", ""), title=title)
                     rec = self._build_record(
                         raw_company=company,
@@ -222,6 +244,12 @@ class JobsCrawler(AsyncBaseCrawler):
                     if rec:
                         seen_urls.add(link)
                         records.append(rec)
+                        fresh_count += 1
+                logger.info(
+                    f"[WeWorkRemotely] {url} -> status: {resp.status_code}, "
+                    f"entries: {len(entries)}, survived AI filter: {survived_ai_filter}, "
+                    f"fresh (<24h): {fresh_count}"
+                )
         except Exception as exc:
             logger.warning(f"WeWorkRemotely fetch error: {exc}")
         return records
@@ -280,5 +308,10 @@ class JobsCrawler(AsyncBaseCrawler):
         ]
         batches = await asyncio.gather(*tasks)
         records = [rec for batch in batches for rec in batch]
+
+        # Persist this run's keys for the next run's novelty heuristic.
+        self._novelty_keys.update(rec.source.url for rec in records)
+        save_seen_keys("jobs", self._novelty_keys)
+
         logger.info(f"Completed JobsCrawler: {len(records)} fresh job postings (<24h) collected.")
         return records

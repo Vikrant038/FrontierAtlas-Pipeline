@@ -53,10 +53,11 @@ class CSVExporter:
         return filepath
 
     def export_all(self, **datasets) -> Dict[str, str]:
-        res = {
-            key: self._write_csv(filename, headers, datasets.get(key))
-            for key, (_, filename, headers) in ENTITY_SPECS.items()
-        }
+        res = {}
+        for key, (_, filename, headers) in ENTITY_SPECS.items():
+            records = datasets.get(key)
+            if records is not None and len(records) > 0:
+                res[key] = self._write_csv(filename, headers, records)
         if "logs" in datasets and datasets["logs"]:
             self._write_csv("entity_resolution_logs.csv", ENTITY_SPECS["logs"][2], datasets["logs"])
         return res

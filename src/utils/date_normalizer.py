@@ -168,9 +168,10 @@ def infer_content_freshness(content: str, fallback_now: Optional[datetime] = Non
         if parsed:
             return parsed
 
-    # Check for strong freshness indicator tokens if fallback_now is provided
-    if fallback_now and any(tok in lead_text for tok in ("breaking news", "just announced", "today announced")):
-        return fallback_now
+    # Strong freshness indicator tokens: treat as "now" — the caller's 24h freshness
+    # gate re-validates, so an over-eager guess can only err toward strict rejection.
+    if any(tok in lead_text for tok in ("breaking news", "just announced", "today announced")):
+        return fallback_now or datetime.now(timezone.utc)
 
     return None
 

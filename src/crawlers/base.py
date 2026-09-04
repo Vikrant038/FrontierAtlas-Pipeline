@@ -37,6 +37,14 @@ DEFAULT_HEADERS = {
 }
 
 
+def github_headers(token: Optional[str]) -> Dict[str, str]:
+    """Build GitHub REST API headers, authenticating when a token is available."""
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 class TransientNetworkError(Exception):
     """Raised on 429, 500, 502, 503, 504, or network disconnects."""
     pass
@@ -212,6 +220,7 @@ class TargetedCrawler(AsyncBaseCrawler):
     def __init__(self, target_count: int = 1000, **kwargs):
         super().__init__(**kwargs)
         self.target_count = target_count
+        self.github_token = settings.github_token
         self.seen_keys: set = set()
         self.collected: List[Any] = []
 
@@ -245,28 +254,3 @@ class TargetedCrawler(AsyncBaseCrawler):
             return self.is_full
         self.collected.append(item)
         return self.is_full
-
-    @property
-    def seen_names(self) -> set:
-        return self.seen_keys
-
-    @seen_names.setter
-    def seen_names(self, val: set) -> None:
-        self.seen_keys = val
-
-    @property
-    def seen_products(self) -> set:
-        return self.seen_keys
-
-    @seen_products.setter
-    def seen_products(self, val: set) -> None:
-        self.seen_keys = val
-
-    @property
-    def _seen_urls(self) -> set:
-        return self.seen_keys
-
-    @_seen_urls.setter
-    def _seen_urls(self, val: set) -> None:
-        self.seen_keys = val
-

@@ -26,7 +26,7 @@ async def test_jobs_crawler_freshness_filtering():
         {
             "id": "101",
             "company": "Scale AI, Inc.",
-            "position": "Staff Research Scientist",
+            "position": "Staff AI Research Scientist",
             "date": now_iso,
             "url": "https://remoteok.com/jobs/101",
             "tags": ["ai", "remote"],
@@ -49,7 +49,7 @@ async def test_jobs_crawler_freshness_filtering():
     # Assert
     assert len(jobs) == 1
     assert jobs[0].content.company == "Scale AI"
-    assert jobs[0].content.title == "Staff Research Scientist"
+    assert jobs[0].content.title == "Staff AI Research Scientist"
     assert jobs[0].content.role_family == RoleFamilyEnum.RESEARCH
     assert jobs[0].content.is_remote is True
 

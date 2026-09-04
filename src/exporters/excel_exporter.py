@@ -48,9 +48,15 @@ class ExcelExporter:
         logs: Optional[List[EntityResolutionLog]] = None,
     ) -> str:
         """Generate the complete 6-tab workbook."""
-        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-        wb = openpyxl.Workbook()
-        wb.remove(wb.active)
+        if os.path.exists(filepath):
+            try:
+                wb = openpyxl.load_workbook(filepath)
+            except Exception:
+                wb = openpyxl.Workbook()
+                wb.remove(wb.active)
+        else:
+            wb = openpyxl.Workbook()
+            wb.remove(wb.active)
 
         datasets = {
             "startups": startups,
@@ -62,7 +68,13 @@ class ExcelExporter:
         }
 
         for key, (title, _, headers) in ENTITY_SPECS.items():
-            self._add_sheet(wb, title, headers, datasets.get(key))
+            records = datasets.get(key)
+            if records is not None and len(records) > 0:
+                if title in wb.sheetnames:
+                    wb.remove(wb[title])
+                self._add_sheet(wb, title, headers, records)
+            elif title not in wb.sheetnames:
+                self._add_sheet(wb, title, headers, records or [])
 
         wb.save(filepath)
         logger.info(f"Generated 6-tab Excel workbook at {filepath}")

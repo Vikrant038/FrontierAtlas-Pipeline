@@ -6,12 +6,11 @@ Correlates paper preprints with verified author GitHub repositories and dynamic 
 import asyncio
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import feedparser
 
-from src.config import settings
-from src.crawlers.base import BotBlockedError, TargetedCrawler
+from src.crawlers.base import BotBlockedError, TargetedCrawler, github_headers
 from src.schemas.entities import ResearchPaperContent, ResearchPaperRecord
 from src.utils.date_normalizer import parse_datetime_to_utc
 from src.utils.logger import logger
@@ -27,17 +26,9 @@ class ResearchPapersCrawler(TargetedCrawler):
     ARXIV_API_BASE = "https://export.arxiv.org/api/query"
     ARXIV_INTERVAL_SECONDS = 3.2  # Strict 1 req / 3s ArXiv policy enforcement
     CDN_CATEGORIES = ["cs.AI", "cs.LG", "cs.CV", "cs.CL", "cs.NE"]
-    ARXIV_HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/atom+xml,application/xml,text/xml,*/*",
-    }
 
     def __init__(self, target_count: int = 1000, **kwargs):
         super().__init__(target_count=target_count, **kwargs)
-        self.github_token = settings.github_token
         self._last_arxiv_time: float = 0.0
         self._last_github_time: float = 0.0
         self._github_pace_lock = asyncio.Lock()
@@ -45,12 +36,6 @@ class ResearchPapersCrawler(TargetedCrawler):
         # Sentinel disables star enrichment after quota exhaustion (prevents
         # thousands of doomed requests in anonymous mode: 60 req/hr cap).
         self._github_quota_exhausted: bool = False
-
-    def _gh_headers(self) -> Dict[str, str]:
-        headers = {"Accept": "application/vnd.github+json"}
-        if self.github_token:
-            headers["Authorization"] = f"Bearer {self.github_token}"
-        return headers
 
     async def _pace_github(self) -> None:
         """Leaky-bucket pacing for GitHub API, safe under concurrent asyncio.gather enrichment."""
@@ -83,7 +68,7 @@ class ResearchPapersCrawler(TargetedCrawler):
             # GitHub API 403 = quota exhaustion, not fingerprint blocking; TLS retry cannot help.
             data = await self.fetch_json(
                 f"https://api.github.com/repos/{repo_path}",
-                headers=self._gh_headers(),
+                headers=github_headers(self.github_token),
                 allow_tls_fallback=False,
             )
             if data and "stargazers_count" in data:
@@ -147,16 +132,17 @@ class ResearchPapersCrawler(TargetedCrawler):
             "abstract_repo": abstract_repo,
         }
 
-    def _filter_new_papers(self, entries: List[Any], limit: int) -> List[Dict[str, Any]]:
-        """Filter and deduplicate unvisited feed entries."""
-        valid: List[Dict[str, Any]] = []
-        for entry in entries:
-            paper = self._parse_feed_entry(entry)
+    def _collect_until_limit(
+        self, candidates: Iterable[Optional[Dict[str, Any]]], limit: int
+    ) -> List[Dict[str, Any]]:
+        """Register-and-deduplicate candidate papers until the batch limit is reached."""
+        papers: List[Dict[str, Any]] = []
+        for paper in candidates:
             if paper and not self.is_seen(paper["paper_url"]):
-                valid.append(paper)
-                if len(valid) >= limit:
+                papers.append(paper)
+                if len(papers) >= limit:
                     break
-        return valid
+        return papers
 
     async def _query_arxiv_api(self, start: int, limit: int) -> List[Dict[str, Any]]:
         """Query official Arxiv Atom API with leaky-bucket pacing and automatic retry backoff."""
@@ -176,11 +162,13 @@ class ResearchPapersCrawler(TargetedCrawler):
         content = await self.fetch(
             self.ARXIV_API_BASE,
             params=params,
-            headers=self.ARXIV_HEADERS,
+            headers={"Accept": "application/atom+xml,application/xml,text/xml,*/*"},
             timeout=30.0,
         )
         feed = feedparser.parse(content)
-        return self._filter_new_papers(getattr(feed, "entries", []), limit)
+        return self._collect_until_limit(
+            (self._parse_feed_entry(e) for e in getattr(feed, "entries", [])), limit
+        )
 
     async def _query_arxiv_cdn(self, limit: int) -> List[Dict[str, Any]]:
         """Harvest fresh papers from Fastly CDN-cached Arxiv RSS feeds."""
@@ -190,7 +178,11 @@ class ResearchPapersCrawler(TargetedCrawler):
                 break
             try:
                 entries = await self.fetch_feed(f"https://rss.arxiv.org/rss/{cat}")
-                results.extend(self._filter_new_papers(entries, limit - len(results)))
+                results.extend(
+                    self._collect_until_limit(
+                        (self._parse_feed_entry(e) for e in entries), limit - len(results)
+                    )
+                )
             except Exception as exc:
                 logger.warning(f"Arxiv CDN RSS failed for {cat}: {repr(exc)}")
         return results
@@ -199,32 +191,29 @@ class ResearchPapersCrawler(TargetedCrawler):
         """Harvest fresh papers from Hugging Face Daily Papers API with verified code repos."""
         try:
             items = await self.fetch_json("https://huggingface.co/api/daily_papers?limit=100")
-            papers: List[Dict[str, Any]] = []
+        except Exception as exc:
+            logger.warning(f"HF daily papers error: {repr(exc)}")
+            return []
+
+        def candidates() -> Iterable[Optional[Dict[str, Any]]]:
             for item in (items or []):
                 p = item.get("paper", {})
                 title = p.get("title", "").strip()
                 arxiv_id = p.get("id", "")
                 pub_date = parse_datetime_to_utc(p.get("publishedAt"))
-                if not title or not pub_date:
-                    continue
-                paper_url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else ""
-                if not paper_url or self.is_seen(paper_url):
+                if not title or not pub_date or not arxiv_id:
                     continue
                 repo_raw = p.get("githubRepo") or ""
                 m = GITHUB_URL_PATTERN.search(repo_raw) if repo_raw else None
-                papers.append({
+                yield {
                     "title": title,
                     "authors": [a.get("name") for a in p.get("authors", []) if a.get("name")] or ["HF AI Researcher"],
-                    "paper_url": paper_url,
+                    "paper_url": f"https://arxiv.org/abs/{arxiv_id}",
                     "published_date": pub_date,
                     "abstract_repo": m.group(1) if m else None,
-                })
-                if len(papers) >= limit:
-                    break
-            return papers
-        except Exception as exc:
-            logger.warning(f"HF daily papers error: {repr(exc)}")
-            return []
+                }
+
+        return self._collect_until_limit(candidates(), limit)
 
     async def _query_openalex_papers(self, page: int, limit: int) -> List[Dict[str, Any]]:
         """Harvest authentic arXiv papers via OpenAlex academic mirror with high throughput."""
@@ -236,28 +225,28 @@ class ResearchPapersCrawler(TargetedCrawler):
         }
         try:
             data = await self.fetch_json("https://api.openalex.org/works", params=params)
-            papers: List[Dict[str, Any]] = []
+        except Exception as exc:
+            logger.warning(f"OpenAlex arXiv mirror error: {repr(exc)}")
+            return []
+
+        def candidates() -> Iterable[Optional[Dict[str, Any]]]:
             for w in (data or {}).get("results", []):
                 title = (w.get("title") or "").strip()
                 loc = (w.get("primary_location") or {}).get("landing_page_url") or w.get("doi") or ""
                 pub_date = parse_datetime_to_utc(w.get("publication_date"))
-                if not title or not loc or not pub_date or self.is_seen(loc):
+                if not title or not loc or not pub_date:
                     continue
                 authors = [a.get("author", {}).get("display_name") for a in w.get("authorships", []) if a.get("author", {}).get("display_name")] or ["AI Researcher"]
                 gh_match = GITHUB_URL_PATTERN.search(f"{title} {loc}")
-                papers.append({
+                yield {
                     "title": title,
                     "authors": authors,
                     "paper_url": loc,
                     "published_date": pub_date,
                     "abstract_repo": gh_match.group(1) if gh_match else None,
-                })
-                if len(papers) >= limit:
-                    break
-            return papers
-        except Exception as exc:
-            logger.warning(f"OpenAlex arXiv mirror error: {repr(exc)}")
-            return []
+                }
+
+        return self._collect_until_limit(candidates(), limit)
 
     async def fetch_papers_batch(self, start: int, limit: int) -> List[Dict[str, Any]]:
         """Fetch papers with automatic multi-tier failover (Arxiv API -> CDN RSS -> HF -> OpenAlex)."""
@@ -279,10 +268,6 @@ class ResearchPapersCrawler(TargetedCrawler):
             alex_papers = await self._query_openalex_papers(page, limit - len(cdn_papers))
             cdn_papers.extend(alex_papers)
         return cdn_papers
-
-    async def fetch_arxiv_batch(self, start: int = 0, max_results: int = 100) -> List[Dict[str, Any]]:
-        """Public alias for backward compatibility."""
-        return await self.fetch_papers_batch(start, max_results)
 
     async def enrich_paper(self, paper: Dict[str, Any]) -> ResearchPaperRecord:
         """Enrich paper metadata with live GitHub repository stars."""

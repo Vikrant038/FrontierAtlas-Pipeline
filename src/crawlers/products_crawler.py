@@ -120,20 +120,18 @@ class ProductsCrawler(TargetedCrawler):
                     items = self._parse_markdown_list(content)
 
                 for name, item_url, desc in items:
-                    if not name or self.is_seen(name) or "#" in item_url:
+                    if not name or "#" in item_url:
                         continue
-                    pricing = self.classify_pricing(name, item_url, desc)
-                    maker = self._extract_maker(name, desc, item_url)
-                    self.collected.append(ProductRecord(
+                    record = ProductRecord(
                         source=SourceMetadata(name=src_name, url=item_url),
                         content=ProductContent(
-                            startupName=maker,
+                            startupName=self._extract_maker(name, desc, item_url),
                             productName=name,
                             productUrl=item_url,
-                            pricingModel=pricing,
+                            pricingModel=self.classify_pricing(name, item_url, desc),
                         ),
-                    ))
-                    if self.is_full:
+                    )
+                    if self.add(name, record):
                         break
             except Exception as exc:
                 logger.warning(f"Error crawling products from {src_name}: {repr(exc)}")

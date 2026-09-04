@@ -46,15 +46,3 @@ def test_targeted_crawler_quota_and_deduplication():
     assert is_full is True
     assert len(crawler.collected) == 2
 
-
-def test_targeted_crawler_backward_compatibility_aliases():
-    # Arrange
-    crawler = TargetedCrawler(target_count=5)
-
-    # Act
-    crawler.seen_keys.add("test_key")
-
-    # Assert
-    assert "test_key" in crawler.seen_names
-    assert "test_key" in crawler.seen_products
-    assert "test_key" in crawler._seen_urls

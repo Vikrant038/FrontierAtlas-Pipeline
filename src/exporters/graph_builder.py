@@ -71,6 +71,23 @@ class KnowledgeGraphBuilder:
             self.graph.add_node(j_node, label=j_title, node_type="JOB", role_family=to_str(j.content.role_family))
             self.graph.add_edge(s_node, j_node, relationship="HIRED_VIA")
 
+        # 5. Add News & Edges: Startup -> MENTIONED_IN -> News or Publisher -> PUBLISHED -> News
+        for n in (news or []):
+            n_node = f"News:{n.content.title}"
+            self.graph.add_node(n_node, label=n.content.title, node_type="NEWS_SIGNAL")
+            linked = False
+            for s in (startups or []):
+                s_name = s.content.entityName
+                if s_name and len(s_name) >= 3 and s_name.lower() in n.content.title.lower():
+                    s_node = self._add_startup(s_name)
+                    self.graph.add_edge(s_node, n_node, relationship="MENTIONED_IN")
+                    linked = True
+            if not linked and n.source.name:
+                pub_node = f"Publisher:{n.source.name}"
+                if pub_node not in self.graph:
+                    self.graph.add_node(pub_node, label=n.source.name, node_type="PUBLISHER")
+                self.graph.add_edge(pub_node, n_node, relationship="PUBLISHED")
+
         logger.info(f"Knowledge Graph constructed: {self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges.")
         return self.graph
 
