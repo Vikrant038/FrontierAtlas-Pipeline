@@ -100,6 +100,9 @@ class JobsCrawler(AsyncBaseCrawler):
                 title = item.get("title", "")
                 if not AI_KEYWORD_PATTERN.search(title):
                     continue
+                url = item.get("url", "")
+                if "arbeitnow.co.uk" in url:
+                    continue
                 loc = item.get("location", "")
                 tags = item.get("tags", [])
                 is_remote = bool(item.get("remote", False)) or self._is_remote(location=loc, tags=tags, title=title)
@@ -107,7 +110,7 @@ class JobsCrawler(AsyncBaseCrawler):
                     raw_company=item.get("company_name", "Unknown"),
                     title=title,
                     raw_date=item.get("created_at"),
-                    url=item.get("url", ""),
+                    url=url,
                     source_name="Arbeitnow AI Jobs",
                     remote=is_remote,
                 )
@@ -150,7 +153,34 @@ class JobsCrawler(AsyncBaseCrawler):
             return []
 
     async def fetch_himalayas(self) -> List[JobRecord]:
-        return await self._fetch_feed_jobs("https://himalayas.app/jobs/rss", "Himalayas AI")
+        records: List[JobRecord] = []
+        try:
+            client = await self.get_client()
+            resp = await client.get("https://himalayas.app/jobs/api?q=ai", headers=self.headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                for job in (data or {}).get("jobs", []):
+                    title = job.get("title", "")
+                    if not AI_KEYWORD_PATTERN.search(title):
+                        continue
+                    company = job.get("companyName") or "Himalayas Tech"
+                    url = job.get("applicationLink") or job.get("guid") or ""
+                    pub_date = job.get("pubDate")
+                    rec = self._build_record(
+                        raw_company=company,
+                        title=title,
+                        raw_date=pub_date,
+                        url=url,
+                        source_name="Himalayas AI",
+                        remote=True,
+                    )
+                    if rec:
+                        records.append(rec)
+        except Exception as exc:
+            logger.warning(f"Himalayas API fetch error: {exc}")
+        if not records:
+            records = await self._fetch_feed_jobs("https://himalayas.app/jobs/rss", "Himalayas AI")
+        return records
 
     async def fetch_weworkremotely(self) -> List[JobRecord]:
         records: List[JobRecord] = []
@@ -219,11 +249,16 @@ class JobsCrawler(AsyncBaseCrawler):
                     loc = ""
                 if not AI_KEYWORD_PATTERN.search(title):
                     continue
+                apply_urls = re.findall(r'https?://[^\s<>"\'\)]+', desc)
+                apply_url = next(
+                    (u for u in apply_urls if not any(d in u for d in ("ycombinator.com", "hnrss.org", "w3.org"))),
+                    getattr(entry, "link", ""),
+                )
                 rec = self._build_record(
                     raw_company=company,
                     title=title,
                     raw_date=getattr(entry, "published", None),
-                    url=getattr(entry, "link", ""),
+                    url=apply_url,
                     source_name="YC HN Who Is Hiring AI",
                     remote=self._is_remote(location=loc, title=title),
                 )

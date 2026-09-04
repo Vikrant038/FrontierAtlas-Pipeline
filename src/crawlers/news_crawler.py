@@ -57,7 +57,7 @@ class NewsCrawler(AsyncBaseCrawler):
         if not title or not isinstance(title, str):
             return ""
         cleaned = re.sub(
-            r"\s*[-|–—]\s*(TechCrunch|The Verge|VentureBeat|MIT Technology Review|Hacker News|Ars Technica|Wired|Gizmodo).*$",
+            r"\s*(?:[-|–—]|\()\s*(TechCrunch|The Verge|VentureBeat|MIT Technology Review|Hacker News|Ars Technica|Wired|Gizmodo)\s*\)?\s*$",
             "",
             title,
             flags=re.IGNORECASE,
@@ -70,7 +70,7 @@ class NewsCrawler(AsyncBaseCrawler):
     async def _process_entry(self, entry: Any, source_name: str) -> Optional[NewsRecord]:
         title = getattr(entry, "title", "").strip()
         link = getattr(entry, "link", "").strip()
-        if not title or not link:
+        if not title or not link or "news.ycombinator.com" in link:
             return None
 
         pub_date = self.check_freshness(getattr(entry, "published", None) or getattr(entry, "updated", None))

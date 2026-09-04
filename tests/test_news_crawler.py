@@ -208,8 +208,8 @@ async def test_news_crawler_full_text_fallback_quality():
 
     crawler = NewsCrawler(sources=[{"name": "Paywalled Feed", "feed_url": "https://example.com/feed.xml"}])
     respx.get("https://example.com/feed.xml").mock(return_value=httpx.Response(200, text=rss_xml))
-    # Article fetch fails with 500 error
-    respx.get("https://example.com/paywalled-article").mock(return_value=httpx.Response(500))
+    # Article fetch fails with 404 (non-retryable client error)
+    respx.get("https://example.com/paywalled-article").mock(return_value=httpx.Response(404))
 
     # Act
     articles = await crawler.crawl()

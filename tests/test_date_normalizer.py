@@ -78,3 +78,58 @@ def test_epoch_timestamp_and_validate_freshness():
 
     empty_dt = validate_freshness_24h(None)
     assert empty_dt is None
+
+
+@freeze_time("2026-09-04 12:00:00")
+def test_extract_date_from_html_meta_and_json_ld():
+    # Arrange
+    from src.utils.date_normalizer import extract_date_from_html
+
+    og_html = """
+    <html><head>
+    <meta property="og:article:published_time" content="2026-09-04T10:00:00Z" />
+    </head><body><p>Article body</p></body></html>
+    """
+    json_ld_html = """
+    <html><head>
+    <script type="application/ld+json">
+    {"@context": "https://schema.org", "@type": "NewsArticle", "datePublished": "2026-09-04T08:30:00+00:00"}
+    </script>
+    </head><body><p>Article body</p></body></html>
+    """
+    time_tag_html = """
+    <html><body><time datetime="2026-09-04T07:15:00Z">Sep 4, 2026</time></body></html>
+    """
+
+    # Act
+    og_dt = extract_date_from_html(og_html)
+    ld_dt = extract_date_from_html(json_ld_html)
+    time_dt = extract_date_from_html(time_tag_html)
+    url_dt = extract_date_from_html("<html></html>", page_url="https://example.com/2026/09/04/new-ai-model")
+
+    # Assert
+    assert og_dt is not None and og_dt.hour == 10
+    assert ld_dt is not None and ld_dt.hour == 8 and ld_dt.minute == 30
+    assert time_dt is not None and time_dt.hour == 7 and time_dt.minute == 15
+    assert url_dt is not None and url_dt.day == 4
+
+
+@freeze_time("2026-09-04 12:00:00")
+def test_infer_content_freshness():
+    # Arrange
+    from src.utils.date_normalizer import infer_content_freshness
+
+    rel_content = "OpenAI today announced a new research model 3 hours ago."
+    just_now_content = "Breaking news: company launched product just now."
+    no_date_content = "Terms of service and privacy policy for our platform."
+
+    # Act
+    rel_dt = infer_content_freshness(rel_content)
+    jn_dt = infer_content_freshness(just_now_content, fallback_now=datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc))
+    none_dt = infer_content_freshness(no_date_content)
+
+    # Assert
+    assert rel_dt is not None and rel_dt.hour == 9
+    assert jn_dt is not None and jn_dt.hour == 12
+    assert none_dt is None
+

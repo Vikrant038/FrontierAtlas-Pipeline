@@ -3,9 +3,12 @@ Temporal normalization and 24-hour signal freshness validation engine.
 Enforces Phase II freshness requirements from PROJECT_CONTEXT.md.
 """
 
+import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
 import dateparser
+from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 
 from src.utils.logger import logger
@@ -78,3 +81,96 @@ def validate_freshness_24h(date_val: Any) -> Optional[datetime]:
     """Parse date and enforce strict 24-hour freshness gate. Returns UTC datetime if fresh, None otherwise."""
     dt = parse_datetime_to_utc(date_val)
     return dt if (dt and is_fresh_24h(dt)[0]) else None
+
+
+def extract_date_from_html(raw_html: str, page_url: str = "") -> Optional[datetime]:
+    """Extract and normalize publication date from HTML metadata tags, JSON-LD, or URL patterns."""
+    if not raw_html:
+        return None
+
+    # 1. URL pattern match: /YYYY/MM/DD/ or /YYYY-MM-DD/
+    if page_url:
+        url_match = re.search(r"/(\d{4})[/-](\d{1,2})[/-](\d{1,2})/", page_url)
+        if url_match:
+            y, m, d = url_match.groups()
+            parsed_url_date = parse_datetime_to_utc(f"{y}-{int(m):02d}-{int(d):02d}")
+            if parsed_url_date:
+                return parsed_url_date
+
+    soup = BeautifulSoup(raw_html[:25000], "html.parser")
+
+    # 2. Meta tags (OpenGraph, Article, Dublin Core)
+    meta_keys = [
+        ("property", "article:published_time"),
+        ("property", "og:article:published_time"),
+        ("name", "article:published_time"),
+        ("name", "publish_date"),
+        ("name", "pubdate"),
+        ("name", "date"),
+        ("name", "sailthru.date"),
+        ("name", "dc.date"),
+        ("name", "dc.date.issued"),
+    ]
+    for attr, key in meta_keys:
+        tag = soup.find("meta", attrs={attr: re.compile(f"^{re.escape(key)}$", re.IGNORECASE)})
+        if tag and tag.get("content"):
+            parsed = parse_datetime_to_utc(tag["content"])
+            if parsed:
+                return parsed
+
+    # 3. JSON-LD structured data
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        try:
+            payload = json.loads(script.string or "")
+            items = payload if isinstance(payload, list) else [payload]
+            for item in items:
+                if isinstance(item, dict):
+                    for field in ("datePublished", "dateCreated", "uploadDate"):
+                        if item.get(field):
+                            parsed = parse_datetime_to_utc(item[field])
+                            if parsed:
+                                return parsed
+        except Exception:
+            continue
+
+    # 4. <time> tags with datetime attribute
+    for time_tag in soup.find_all("time"):
+        dt_val = time_tag.get("datetime") or time_tag.get_text()
+        if dt_val:
+            parsed = parse_datetime_to_utc(dt_val)
+            if parsed:
+                return parsed
+
+    return None
+
+
+def infer_content_freshness(content: str, fallback_now: Optional[datetime] = None) -> Optional[datetime]:
+    """Intelligently infer publication timestamp from relative recency expressions in text."""
+    if not content:
+        return None
+
+    lead_text = content[:2000].lower()
+
+    # 1. Specific relative offsets: e.g. "3 hours ago", "45 minutes ago"
+    offset_match = re.search(r"\b(\d+\s*(?:hours?|minutes?|secs?|seconds?)\s*ago)\b", lead_text)
+    if offset_match:
+        parsed = parse_datetime_to_utc(offset_match.group(1))
+        if parsed:
+            return parsed
+
+    # 2. Generic recency terms
+    word_match = re.search(r"\b(just\s+now|yesterday|today)\b", lead_text)
+    if word_match:
+        phrase = word_match.group(1)
+        if phrase == "just now":
+            return fallback_now or datetime.now(timezone.utc)
+        parsed = parse_datetime_to_utc(phrase)
+        if parsed:
+            return parsed
+
+    # Check for strong freshness indicator tokens if fallback_now is provided
+    if fallback_now and any(tok in lead_text for tok in ("breaking news", "just announced", "today announced")):
+        return fallback_now
+
+    return None
+
