@@ -51,9 +51,9 @@ class LLMTransientError(Exception):
 
 
 _LLM_RETRY = retry(
-    wait=wait_exponential_jitter(initial=0.5, max=5.0, jitter=0.5),
-    stop=stop_after_attempt(3),
-    retry=retry_if_exception_type((LLMRateLimitError, LLMTransientError)),
+    wait=wait_exponential_jitter(initial=0.5, max=3.0, jitter=0.5),
+    stop=stop_after_attempt(2),
+    retry=retry_if_exception_type(LLMTransientError),
     reraise=True,
 )
 
@@ -74,6 +74,14 @@ class MultiTierLLMEngine:
         self._clients: Dict[str, Any] = {}
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._gemini_exhausted: bool = False
+        self._groq_exhausted: bool = False
+        self.tier_usage: Dict[str, int] = {
+            "gemini": 0,
+            "groq": 0,
+            "deepseek": 0,
+            "deterministic": 0,
+        }
 
     def _get_semaphore(self) -> asyncio.Semaphore:
         try:
@@ -90,6 +98,8 @@ class MultiTierLLMEngine:
         """Tier 1: Google Gemini Flash using google-genai AsyncChat (AFC-safe path)."""
         if not settings.gemini_api_key:
             raise LLMTransientError("Gemini API key is not configured.")
+        if self._gemini_exhausted:
+            raise LLMRateLimitError("Gemini API quota exhausted for this session.")
         try:
             if "gemini" not in self._clients:
                 from google import genai
@@ -97,19 +107,22 @@ class MultiTierLLMEngine:
             client = self._clients["gemini"]
             from google.genai import types
 
-            # Fresh chat per call: schema differs per request; stateless extraction.
-            chat = client.aio.chats.create(
-                model=settings.gemini_model,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1,
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=settings.gemini_model,
+                    contents=f"{prompt}\n\nStrict JSON schema:\n{schema_json}",
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                    ),
                 ),
+                timeout=10.0,
             )
-            response = await chat.send_message(f"{prompt}\n\nStrict JSON schema:\n{schema_json}")
             return response.text or "{}"
         except Exception as exc:
             err_msg = str(exc).lower()
             if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg:
+                self._gemini_exhausted = True
                 raise LLMRateLimitError(str(exc)) from exc
             raise LLMTransientError(str(exc)) from exc
 
@@ -129,25 +142,28 @@ class MultiTierLLMEngine:
             key = f"{base_url}_{api_key}"
             if key not in self._clients:
                 from openai import AsyncOpenAI
-                self._clients[key] = AsyncOpenAI(api_key=api_key, base_url=base_url)
+                self._clients[key] = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=10.0)
             client = self._clients[key]
 
-            completion = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": f"Extract structured data as valid JSON matching schema:\n{schema_json}",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.1,
+            completion = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": f"Extract structured data as valid JSON matching schema:\n{schema_json}",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1,
+                ),
+                timeout=10.0,
             )
             return completion.choices[0].message.content or "{}"
         except Exception as exc:
             err_msg = str(exc).lower()
-            if "429" in err_msg:
+            if "429" in err_msg or "rate_limit" in err_msg:
                 raise LLMRateLimitError(str(exc)) from exc
             raise LLMTransientError(str(exc)) from exc
 
@@ -174,12 +190,17 @@ class MultiTierLLMEngine:
         if "pricingModel" in schema_cls.model_fields:
             data["pricingModel"] = classify_pricing_by_keywords("", "", raw_text)
 
+        if "canonical" in schema_cls.model_fields:
+            data["canonical"] = None
+            data["confidence"] = 0.0
+
         if "title" in schema_cls.model_fields:
             data["title"] = first_line[:200]
         if "full_text" in schema_cls.model_fields:
             data["full_text"] = raw_text[:5000]
 
         return data
+
 
     async def extract_structured(
         self,
@@ -217,22 +238,45 @@ class MultiTierLLMEngine:
 
             for provider_name, provider_id, call_fn in tiers:
                 try:
-                    await rate_limiter.acquire(provider_id)
-                    res_text = await call_fn()
+                    await rate_limiter.acquire(provider_id, max_wait=0.0)
+                    res_text = await asyncio.wait_for(call_fn(), timeout=12.0)
                     cleaned_json = _clean_json_markdown(res_text)
                     parsed = json.loads(cleaned_json)
-                    return schema_cls.model_validate(parsed)
+                    result = schema_cls.model_validate(parsed)
+                    tier_key = "deepseek" if provider_id == "custom" else provider_id
+                    self.tier_usage[tier_key] += 1
+                    return result
                 except Exception as exc:
                     logger.debug(f"{provider_name} fallback: {exc}. Trying next tier...")
 
             # Tier 4: Zero-API Deterministic Heuristics
             try:
                 det_data = self._deterministic_extract(budgeted_text, schema_cls)
-                return schema_cls.model_validate(det_data)
+                result = schema_cls.model_validate(det_data)
+                self.tier_usage["deterministic"] += 1
+                return result
             except ValidationError as val_err:
                 raise ExtractionFailureError(
                     f"All extraction tiers failed for {schema_cls.__name__}"
                 ) from val_err
+
+    def get_tier_usage(self) -> Dict[str, int]:
+        """Return a copy of the current tier usage counts."""
+        return dict(self.tier_usage)
+
+    def reset_tier_usage(self) -> None:
+        """Reset all tier usage counts to zero."""
+        for k in self.tier_usage:
+            self.tier_usage[k] = 0
+
+    def save_tier_telemetry(self, filepath: str = "exports/llm_tier_telemetry.json") -> str:
+        """Persist tier usage metrics to JSON for audit and evaluation."""
+        import os
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(self.get_tier_usage(), f, indent=2)
+        logger.info(f"LLM tier telemetry persisted to {filepath}: {self.tier_usage}")
+        return filepath
 
 
 # Global singleton instance

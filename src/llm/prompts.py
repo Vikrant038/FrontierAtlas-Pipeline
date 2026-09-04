@@ -41,6 +41,20 @@ class ProductPricingSchema(BaseModel):
     )
 
 
+class EntityDisambiguationSchema(BaseModel):
+    """Schema for ambiguous entity resolution against top candidate canonical names."""
+    canonical: Optional[str] = Field(
+        default=None,
+        description="The exact matching canonical entity name from the candidates list, or null if NONE match",
+    )
+    confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score between 0.0 and 1.0 for this resolution decision",
+    )
+
+
 # ============================================================================
 # Strict Prompt Definitions
 # ============================================================================
@@ -90,3 +104,19 @@ Exact JSON Template:
 {
   "pricingModel": "FREE"
 }"""
+
+ENTITY_DISAMBIGUATION_PROMPT = """You are an expert AI entity resolution and company disambiguation analyst.
+Given a raw entity name, top candidate canonical entities, and an optional source domain, determine if the raw entity refers to one of the candidate canonical entities or if it is a completely distinct entity (NONE).
+
+Instructions:
+1. If the raw entity clearly refers to one of the candidate names (e.g. an acronym, subsidiary, formal corporate name, or common variation), return that exact candidate name in "canonical".
+2. If none of the candidates match, or if there is insufficient evidence / ambiguity, return null in "canonical".
+3. Provide a confidence score between 0.0 and 1.0 reflecting your certainty.
+
+Return ONLY valid JSON. No explanation. No markdown wrapper.
+Exact JSON Template:
+{
+  "canonical": "Canonical Name or null",
+  "confidence": 0.85
+}"""
+
