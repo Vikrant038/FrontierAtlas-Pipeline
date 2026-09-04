@@ -142,14 +142,21 @@ class ResearchPaperRecord(BaseEntityModel):
     content: ResearchPaperContent
 
     def to_row(self) -> List[Any]:
+        # Distinguish: no repo in abstract (both None → ""), vs repo found but lookup failed (url set, stars None → "N/A")
+        if self.content.github_url is None:
+            github_url_cell = ""
+            github_stars_cell = ""
+        else:
+            github_url_cell = self.content.github_url
+            github_stars_cell = self.content.github_stars if self.content.github_stars is not None else "N/A"
         return [
             self.schemaVersion,
             self.recordType,
             self.content.title,
             ", ".join(self.content.authors),
             self.content.paper_url,
-            self.content.github_url or "None",
-            self.content.github_stars if self.content.github_stars is not None else "N/A",
+            github_url_cell,
+            github_stars_cell,
             self.content.published_date.isoformat(),
         ]
 

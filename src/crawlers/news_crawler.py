@@ -11,7 +11,7 @@ from src.llm.chunker import clean_html_text
 from src.llm.fallback_chain import llm_engine
 from src.llm.prompts import NewsSummarySchema, NEWS_SUMMARY_PROMPT
 from src.schemas.entities import NewsContent, NewsRecord, SourceMetadata
-from src.utils.date_normalizer import extract_date_from_html, infer_content_freshness
+from src.utils.date_normalizer import extract_date_from_html, infer_content_freshness, parse_datetime_to_utc
 from src.utils.run_state import load_seen_keys, save_seen_keys
 from src.utils.logger import logger
 
@@ -33,7 +33,7 @@ class NewsCrawler(AsyncBaseCrawler):
         self._seen_urls: set = set()
         self._seen_titles: List[str] = []
         self.stats: Dict[str, Dict[str, int]] = {
-            s["name"]: {"total": 0, "full_text": 0} for s in self.sources
+            s["name"]: {"total": 0, "full_text": 0, "llm_summary": 0, "rss_fallback": 0} for s in self.sources
         }
         # Keys collected in the PREVIOUS run: cross-run novelty heuristic state.
         self._prev_run_urls = load_seen_keys("news")
@@ -58,6 +58,27 @@ class NewsCrawler(AsyncBaseCrawler):
         ]
         query = urlencode(filtered_params)
         return urlunparse((scheme, netloc, path, parsed.params, query, ""))
+
+    @staticmethod
+    def _extract_hn_article_url(rss_description: str) -> Optional[str]:
+        """Extract the real external Article URL from HN's RSS description HTML blob.
+
+        HN RSS descriptions look like:
+          <p>Article URL: <a href="https://example.com/...">...</a></p>
+          <p>Comments URL: <a href="https://news.ycombinator.com/...">...</a></p>
+        We want the first non-HN href — the actual source article.
+        """
+        if not rss_description:
+            return None
+        # Match any href that is NOT a news.ycombinator.com link
+        href_pattern = re.compile(r'href="(https?://(?!news\.ycombinator\.com)[^"]+)"', re.IGNORECASE)
+        match = href_pattern.search(rss_description)
+        if match:
+            candidate = match.group(1).strip()
+            # Reject obviously bad targets (GitHub issue trackers, video embeds, etc. are fine)
+            if candidate and not candidate.startswith("javascript:"):
+                return candidate
+        return None
 
     @staticmethod
     def _normalize_title(title: str) -> str:
@@ -92,6 +113,13 @@ class NewsCrawler(AsyncBaseCrawler):
                 logger.info(f"Duplicate news title skipped: '{title}' ({match[1]:.1f}% match with '{match[0]}')")
                 return None
 
+        # Fast freshness pre-check: skip network fetch if explicit feed date fails 24h gate
+        raw_feed_date = getattr(entry, "published", None) or getattr(entry, "updated", None)
+        parsed_feed_date = parse_datetime_to_utc(raw_feed_date) if raw_feed_date else None
+        pub_date = self.check_freshness(raw_feed_date)
+        if parsed_feed_date is not None and pub_date is None:
+            return None
+
         # Reserve dedup keys synchronously BEFORE awaiting the fetch: concurrent
         # gather tasks would otherwise both pass the membership check (add-after-await race).
         self._seen_urls.add(norm_url)
@@ -100,19 +128,34 @@ class NewsCrawler(AsyncBaseCrawler):
         full_text = ""
         is_full_text = False
         raw_html = ""
-        try:
-            raw_html = await self.fetch(link)
-            cleaned = clean_html_text(raw_html)
-            if cleaned and len(cleaned.strip()) >= 20:
-                full_text = cleaned.strip()
-                is_full_text = True
-        except Exception as exc:
-            logger.debug(f"Full-text fetch failed for {link}: {exc}")
+        if source_name == "Hacker News AI":
+            # HN RSS descriptions are HTML blobs: <p>Article URL: <a href="...">...</a></p>...
+            # Extract the real external article URL and attempt a full-text fetch.
+            rss_description = getattr(entry, "summary", "") or ""
+            article_url = self._extract_hn_article_url(rss_description) or link
+            if article_url != link:
+                try:
+                    raw_html = await self.fetch(article_url, timeout=6.0, allow_tls_fallback=False, allow_retry=False)
+                    cleaned = clean_html_text(raw_html)
+                    if cleaned and len(cleaned.strip()) >= 20:
+                        full_text = cleaned.strip()
+                        is_full_text = True
+                        logger.debug(f"HN full-text fetched from linked article: {article_url}")
+                except Exception as exc:
+                    logger.debug(f"HN article fetch failed for {article_url}: {exc}")
+            # If full-text unavailable, synthesize a clean summary from title (no HTML dumped)
+            if not full_text:
+                full_text = title
+        else:
+            try:
+                raw_html = await self.fetch(link, timeout=5.0, allow_tls_fallback=False, allow_retry=False)
+                cleaned = clean_html_text(raw_html)
+                if cleaned and len(cleaned.strip()) >= 20:
+                    full_text = cleaned.strip()
+                    is_full_text = True
+            except Exception as exc:
+                logger.debug(f"Full-text fetch failed for {link}: {exc}")
 
-        # Freshness gate: strict feed date, then HTML metadata, then text inference,
-        # then cross-run novelty (unseen since last run = new; previously seen = old).
-        raw_feed_date = getattr(entry, "published", None) or getattr(entry, "updated", None)
-        pub_date = self.check_freshness(raw_feed_date)
         has_source_date = raw_feed_date is not None and str(raw_feed_date).strip() != ""
         date_inferred = False
         if not pub_date:
@@ -149,8 +192,16 @@ class NewsCrawler(AsyncBaseCrawler):
             if is_full_text:
                 self.stats[source_name]["full_text"] += 1
 
-        # Prefer high-fidelity factual LLM summary when full text is available; fall back to RSS summary
-        summary = getattr(entry, "summary", "") or (full_text[:300] if full_text else title)
+        # HN: rss_summary contains "Article URL: / Comments URL: / Points:" metadata even after HTML strip.
+        # For HN we use full_text exclusively (fetched article body or title-fallback — never metadata).
+        # Other sources: strip any residual HTML tags from the RSS snippet to keep the field plain-text.
+        if source_name == "Hacker News AI":
+            summary = (full_text[:300] if full_text else title)
+        else:
+            rss_summary_raw = getattr(entry, "summary", "") or ""
+            rss_summary_clean = clean_html_text(rss_summary_raw) if rss_summary_raw else ""
+            summary = rss_summary_clean or (full_text[:300] if full_text else title)
+        is_llm_summary = False
         if is_full_text and full_text:
             try:
                 llm_out = await llm_engine.extract_structured(
@@ -160,8 +211,15 @@ class NewsCrawler(AsyncBaseCrawler):
                 )
                 if llm_out.summary and len(llm_out.summary.strip()) >= 20:
                     summary = llm_out.summary.strip()
+                    is_llm_summary = True
             except Exception as exc:
                 logger.debug(f"LLM summary extraction fallback for '{title}': {exc}")
+
+        if source_name in self.stats:
+            if is_llm_summary:
+                self.stats[source_name]["llm_summary"] += 1
+            else:
+                self.stats[source_name]["rss_fallback"] += 1
 
         return NewsRecord(
             source=SourceMetadata(name=source_name, url=link),
@@ -210,6 +268,15 @@ class NewsCrawler(AsyncBaseCrawler):
         for src_name, st in self.stats.items():
             if st["total"] > 0:
                 logger.warning(f"Full-text coverage: {src_name}: {st['full_text']}/{st['total']} full-text")
+
+        # Persist summary telemetry for audit and verification
+        try:
+            import json, os
+            os.makedirs("exports", exist_ok=True)
+            with open("exports/news_summary_telemetry.json", "w", encoding="utf-8") as f:
+                json.dump(self.stats, f, indent=2)
+        except Exception as exc:
+            logger.debug(f"Could not persist news summary telemetry: {exc}")
 
         logger.info(f"Completed NewsCrawler: {len(deduped_records)} fresh articles (<24h) collected.")
         return deduped_records
