@@ -1,0 +1,63 @@
+{
+  "comments": "Recorded fixture from Himalayas API",
+  "updatedAt": 1788537823,
+  "offset": 0,
+  "limit": 20,
+  "totalCount": 3,
+  "nextCursor": "cursor_123",
+  "jobs": [
+    {
+      "title": "Senior AI Systems Engineer",
+      "excerpt": "Intetics Inc. is a global technology company providing custom software development.",
+      "companyName": "Intetics",
+      "companySlug": "intetics",
+      "companyLogo": "https://cdn-images.himalayas.app/agxnw11wrfekokmuqh9orm4m1n1q",
+      "employmentType": "Full Time",
+      "minSalary": 150000,
+      "maxSalary": 200000,
+      "salaryPeriod": "annual",
+      "seniority": ["Senior"],
+      "currency": "USD",
+      "locationRestrictions": ["Worldwide"],
+      "timezoneRestrictions": [-8, -7, -6, -5, -4, 0, 1],
+      "categories": ["AI", "Machine-Learning", "Engineering"],
+      "parentCategories": ["Engineering"],
+      "description": "<p>Developing large-scale AI systems for enterprise automation.</p>",
+      "pubDate": 1788523200,
+      "expiryDate": 1793721816,
+      "applicationLink": "https://himalayas.app/companies/intetics/jobs/senior-ai-systems-engineer",
+      "guid": "https://himalayas.app/companies/intetics/jobs/senior-ai-systems-engineer"
+    },
+    {
+      "title": "Staff Machine Learning Scientist",
+      "excerpt": "Mercor connects elite creative and technical talent with leading AI research labs.",
+      "companyName": "Mercor",
+      "companySlug": "mercor",
+      "companyLogo": "https://cdn-images.himalayas.app/6jo5q9nua35jgtdfm41nq6b7ocqf",
+      "employmentType": "Contractor",
+      "minSalary": 80,
+      "maxSalary": 160,
+      "salaryPeriod": "hourly",
+      "seniority": ["Senior"],
+      "currency": "USD",
+      "locationRestrictions": ["Worldwide"],
+      "timezoneRestrictions": [1],
+      "categories": ["Machine-Learning", "Data-Science"],
+      "parentCategories": ["Data Science"],
+      "description": "<p>Train next-generation frontier models.</p>",
+      "pubDate": 1788523200,
+      "expiryDate": 1793721686,
+      "applicationLink": "https://himalayas.app/companies/mercor/jobs/staff-ml-scientist",
+      "guid": "https://himalayas.app/companies/mercor/jobs/staff-ml-scientist"
+    },
+    {
+      "title": "Executive Assistant to Leadership",
+      "excerpt": "Executive support in fast-paced tech company.",
+      "companyName": "TechCo",
+      "companySlug": "techco",
+      "pubDate": 1788523200,
+      "applicationLink": "https://himalayas.app/companies/techco/jobs/ea",
+      "guid": "https://himalayas.app/companies/techco/jobs/ea"
+    }
+  ]
+}

@@ -6,12 +6,9 @@ SSRF URL sanitization, and curl-cffi TLS impersonation fallback.
 
 import asyncio
 import json
-import time
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
 import feedparser
 import httpx
 from curl_cffi.requests import AsyncSession as CurlAsyncSession
@@ -23,6 +20,15 @@ from tenacity import (
 )
 
 from src.config import settings
+from src.crawlers.anti_bot import (
+    _block_cooldown_until,
+    _block_history,
+    _breaker_is_open,
+    _host_of,
+    _looks_like_challenge,
+    _record_block,
+    _record_escalation_success,
+)
 from src.utils.date_normalizer import parse_retry_after, validate_freshness_24h
 from src.utils.logger import logger
 from src.utils.security import validate_url_safe
@@ -88,82 +94,6 @@ async def _handle_retry_after(headers: Any, url: str) -> None:
             f"HTTP 429 for {url}. Sleeping {capped_wait:.1f}s per Retry-After header ('{retry_after}')."
         )
         await asyncio.sleep(capped_wait)
-
-
-# ---- Anti-bot circuit breaker (per-host) ----
-# A host that keeps returning 403 burns one TLS impersonation + one full browser launch
-# per request. After _BLOCK_THRESHOLD blocks within _BLOCK_WINDOW_SECONDS, escalation is
-# skipped for a _BLOCK_COOLDOWN_SECONDS cooldown and callers fail fast to their fallback.
-_BLOCK_WINDOW_SECONDS = 600.0
-_BLOCK_THRESHOLD = 3
-_BLOCK_COOLDOWN_SECONDS = 1800.0
-
-_block_history: Dict[str, deque] = defaultdict(deque)
-_block_cooldown_until: Dict[str, float] = {}
-
-# Bot-challenge interstitials (Cloudflare/DDoS-Guard/CAPTCHA) can come back as HTTP 200;
-# they are short pages carrying verification markers. Treat them as blocks instead of data.
-_CHALLENGE_MARKERS = (
-    "captcha",
-    "cf-challenge",
-    "cf-chl-",
-    "challenge-platform",
-    "verify you are human",
-    "unusual traffic",
-    "attention required",
-    "are you a robot",
-    "recaptcha",
-    "hcaptcha",
-    "turnstile",
-    "ddos-guard",
-)
-_MAX_CHALLENGE_PAGE_CHARS = 5000
-
-
-def _host_of(url: str) -> str:
-    """Extract the lowercased host from a URL for breaker bookkeeping."""
-    try:
-        return urlparse(url).netloc.lower()
-    except Exception:
-        return url or ""
-
-
-def _breaker_is_open(host: str) -> bool:
-    """True while the host is in cooldown after tripping the breaker."""
-    return time.monotonic() < _block_cooldown_until.get(host, 0.0)
-
-
-def _record_block(host: str) -> bool:
-    """Record an anti-bot block; returns True if this block trips the breaker."""
-    now = time.monotonic()
-    hist = _block_history[host]
-    hist.append(now)
-    while hist and now - hist[0] > _BLOCK_WINDOW_SECONDS:
-        hist.popleft()
-    if len(hist) >= _BLOCK_THRESHOLD:
-        _block_cooldown_until[host] = now + _BLOCK_COOLDOWN_SECONDS
-        hist.clear()
-        logger.warning(
-            f"Anti-bot circuit breaker tripped for {host}: {_BLOCK_THRESHOLD} blocks within "
-            f"{_BLOCK_WINDOW_SECONDS:.0f}s; skipping escalation for {_BLOCK_COOLDOWN_SECONDS / 60:.0f} min."
-        )
-        return True
-    return False
-
-
-def _record_escalation_success(host: str) -> None:
-    """A successful escalation means the block was transient; reset the host's history."""
-    _block_history[host].clear()
-
-
-def _looks_like_challenge(content: Any) -> bool:
-    """Heuristic: bot-challenge interstitials are short pages carrying verification markers."""
-    if not isinstance(content, str) or not content:
-        return False
-    if len(content) > _MAX_CHALLENGE_PAGE_CHARS:
-        return False
-    lower = content.lower()
-    return any(marker in lower for marker in _CHALLENGE_MARKERS)
 
 
 def anti_bot_snapshot() -> Dict[str, Any]:

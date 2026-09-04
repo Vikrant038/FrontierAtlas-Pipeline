@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss">
+  <channel>
+    <title>We Work Remotely: Remote jobs in design, programming, marketing and more</title>
+    <link>https://weworkremotely.com/categories/remote-programming-jobs.rss</link>
+    <description>We Work Remotely: Remote jobs in design, programming, marketing and more</description>
+    <language>en-US</language>
+    <ttl>60</ttl>
+    <item>
+      <title>Collaboration.Ai: Senior Software AI Engineer</title>
+      <region>Anywhere in the World</region>
+      <category>Back-End Programming</category>
+      <description>&lt;p&gt;&lt;strong&gt;Headquarters:&lt;/strong&gt; Minneapolis, MN&lt;br /&gt;&lt;strong&gt;URL:&lt;/strong&gt; &lt;a href="http://collaboration.ai"&gt;http://collaboration.ai&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Collaboration.Ai is an AI-powered software and services company.&lt;/p&gt;</description>
+      <pubDate>Mon, 17 Aug 2026 11:57:38 +0000</pubDate>
+      <guid>https://weworkremotely.com/remote-jobs/collaboration-ai-senior-software-ai-engineer</guid>
+      <link>https://weworkremotely.com/remote-jobs/collaboration-ai-senior-software-ai-engineer</link>
+    </item>
+    <item>
+      <title>Proxify AB: Senior Ruby on Rails Developer (AI-Augmented Engineering)</title>
+      <region>Anywhere in the World</region>
+      <category>Full-Stack Programming</category>
+      <description>&lt;p&gt;Work with AI-augmented dev tools.&lt;/p&gt;</description>
+      <pubDate>Fri, 14 Aug 2026 10:13:03 +0000</pubDate>
+      <guid>https://weworkremotely.com/remote-jobs/proxify-ab-senior-ruby-developer</guid>
+      <link>https://weworkremotely.com/remote-jobs/proxify-ab-senior-ruby-developer</link>
+    </item>
+    <item>
+      <title>Digital Agency: General Accountant</title>
+      <region>USA Only</region>
+      <category>Accounting</category>
+      <description>&lt;p&gt;Looking for CPA accountant.&lt;/p&gt;</description>
+      <pubDate>Mon, 17 Aug 2026 12:00:00 +0000</pubDate>
+      <guid>https://weworkremotely.com/remote-jobs/general-accountant</guid>
+      <link>https://weworkremotely.com/remote-jobs/general-accountant</link>
+    </item>
+  </channel>
+</rss>

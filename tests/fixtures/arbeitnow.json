@@ -1,0 +1,52 @@
+{
+  "data": [
+    {
+      "slug": "caronsale-machine-learning-engineer",
+      "company_name": "caronsale",
+      "title": "Machine Learning Engineer (m/f/x)",
+      "description": "<p>Building ML pipelines for automotive valuation.</p>",
+      "remote": false,
+      "url": "https://www.arbeitnow.com/view/caronsale-machine-learning-engineer",
+      "tags": ["Python", "Machine Learning", "PyTorch"],
+      "job_types": ["Full Time"],
+      "location": "Berlin, Germany",
+      "created_at": 1788523200
+    },
+    {
+      "slug": "lyto-ai-product-engineer",
+      "company_name": "Lyto Brands Group GmbH",
+      "title": "AI Product Engineer - Internal Tools & Automation (m/w/d) - fully remote",
+      "description": "<p>Work on internal LLM automation.</p>",
+      "remote": true,
+      "url": "https://www.arbeitnow.com/view/lyto-ai-product-engineer",
+      "tags": ["AI", "Automation", "Remote"],
+      "job_types": ["Full Time"],
+      "location": "Remote",
+      "created_at": 1788523200
+    },
+    {
+      "slug": "office-manager",
+      "company_name": "Berlin Tech",
+      "title": "Office & Facility Manager",
+      "description": "<p>Office management in Berlin Mitte.</p>",
+      "remote": false,
+      "url": "https://www.arbeitnow.com/view/office-manager",
+      "tags": ["Management"],
+      "job_types": ["Full Time"],
+      "location": "Berlin, Germany",
+      "created_at": 1788523200
+    }
+  ],
+  "links": {
+    "first": "https://www.arbeitnow.com/api/job-board-api?page=1",
+    "last": "https://www.arbeitnow.com/api/job-board-api?page=1"
+  },
+  "meta": {
+    "current_page": 1,
+    "from": 1,
+    "path": "https://www.arbeitnow.com/api/job-board-api",
+    "per_page": 100,
+    "to": 3,
+    "total": 3
+  }
+}

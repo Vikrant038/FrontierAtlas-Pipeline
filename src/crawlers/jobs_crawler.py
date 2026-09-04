@@ -262,24 +262,27 @@ class JobsCrawler(AsyncBaseCrawler):
             logger.warning(f"WeWorkRemotely fetch error: {exc}")
         return records
 
+    @staticmethod
+    def _parse_hn_first_line(first_line: str) -> Tuple[Optional[str], str, str]:
+        """Parse a YC HN posting's first line into (company, title, location).
+        Handles 'Company | Title | Location' and 'Company is the ...' formats;
+        company is None in the generic branch where the caller falls back to the
+        entry author."""
+        if "|" in first_line:
+            parts = [p.strip() for p in first_line.split("|")]
+            return parts[0], (parts[1] if len(parts) > 1 else first_line), (parts[2] if len(parts) > 2 else "")
+        if "is the" in first_line:
+            return first_line.split("is the")[0].strip(), first_line[:100], ""
+        return None, first_line[:100], ""
+
     async def _process_yc_hn_entry(self, entry: Any, sem: asyncio.Semaphore) -> Optional[JobRecord]:
         """Process a single YC HN job entry with optional LLM extraction."""
         desc = (getattr(entry, "summary", "") or getattr(entry, "description", "") or "")
         clean_desc = re.sub(r"<[^>]+>", "", desc).strip()
         first_line = clean_desc.split("\n")[0].strip() if clean_desc else ""
-        if "|" in first_line:
-            parts = [p.strip() for p in first_line.split("|")]
-            company = parts[0]
-            title = parts[1] if len(parts) > 1 else first_line
-            loc = parts[2] if len(parts) > 2 else ""
-        elif "is the" in first_line:
-            company = first_line.split("is the")[0].strip()
-            title = first_line[:100]
-            loc = ""
-        else:
+        company, title, loc = self._parse_hn_first_line(first_line)
+        if company is None:
             company = getattr(entry, "author", "") or "AI Startup"
-            title = first_line[:100]
-            loc = ""
         if not AI_KEYWORD_PATTERN.search(title):
             return None
         raw_date = getattr(entry, "published", None)

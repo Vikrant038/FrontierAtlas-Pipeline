@@ -191,6 +191,77 @@ class NewsCrawler(AsyncBaseCrawler):
         if title in self._seen_titles:
             self._seen_titles.remove(title)
 
+    def _resolve_entry_date(
+        self,
+        pub_date: Optional[datetime],
+        raw_feed_date: Any,
+        raw_html: str,
+        full_text: str,
+        link: str,
+        norm_url: str,
+        norm_title: str,
+    ) -> Optional[datetime]:
+        """Resolve an entry's date through the freshness tiers: feed -> HTML metadata
+        -> content-text inference -> novelty stamping. Returns the resolved UTC date,
+        or None when the entry is strictly stale (source-stated date failed the 24h
+        gate, or a dateless URL seen in a previous run) and must be rolled back."""
+        has_source_date = raw_feed_date is not None and str(raw_feed_date).strip() != ""
+        inferred = False
+        if not pub_date:
+            html_date = extract_date_from_html(raw_html, page_url=link)
+            has_source_date = has_source_date or html_date is not None
+            pub_date = self.check_freshness(html_date)
+            inferred = pub_date is not None
+        if not pub_date and full_text:
+            pub_date = self.check_freshness(infer_content_freshness(full_text))
+            inferred = pub_date is not None
+        if not pub_date:
+            if has_source_date or norm_url in self._prev_run_urls:
+                # Source-stated date failed the gate, or a dateless URL already seen:
+                # strictly stale - novelty stamping must not override a real date.
+                return None
+            # Truly dateless, never seen before: treat as new since last run.
+            pub_date = datetime.now(timezone.utc)
+            inferred = True
+            logger.debug(f"Dateless entry treated as new-since-last-run: '{norm_title}'.")
+        if inferred:
+            logger.debug(f"Publication date inferred heuristically for '{norm_title}'.")
+        return pub_date
+
+    async def _finalize_entry(
+        self,
+        source_name: str,
+        entry: Any,
+        title: str,
+        link: str,
+        full_text: str,
+        is_full_text: bool,
+        raw_html: str,
+        raw_feed_date: Any,
+        pub_date: Optional[datetime],
+        norm_url: str,
+        norm_title: str,
+    ) -> Optional[NewsRecord]:
+        """Resolve the entry's date, record coverage stats, build the summary, and
+        construct the record. Rolls back dedup reservations on strictly-stale entries."""
+        pub_date = self._resolve_entry_date(
+            pub_date, raw_feed_date, raw_html, full_text, link, norm_url, norm_title
+        )
+        if pub_date is None:
+            self._rollback_seen(norm_url, norm_title)
+            return None
+        if source_name in self.stats:
+            self.stats[source_name]["total"] += 1
+            if is_full_text:
+                self.stats[source_name]["full_text"] += 1
+        summary, is_llm_summary = await self._build_summary(source_name, entry, title, full_text)
+        if source_name in self.stats:
+            self.stats[source_name]["llm_summary" if is_llm_summary else "rss_fallback"] += 1
+        return NewsRecord(
+            source=SourceMetadata(name=source_name, url=link),
+            content=NewsContent(title=title, published_date=pub_date, summary=summary[:settings.news_summary_max_len] if summary else None, full_text=full_text or summary or title),
+        )
+
     async def _process_entry(self, entry: Any, source_name: str) -> Optional[NewsRecord]:
         title = (getattr(entry, "title", "") or "").strip()
         link = (getattr(entry, "link", "") or "").strip()
@@ -221,49 +292,9 @@ class NewsCrawler(AsyncBaseCrawler):
 
         full_text, is_full_text, raw_html = await self._fetch_full_text(source_name, entry, link, title)
 
-        has_source_date = raw_feed_date is not None and str(raw_feed_date).strip() != ""
-        date_inferred = False
-        if not pub_date:
-            html_date = extract_date_from_html(raw_html, page_url=link)
-            has_source_date = has_source_date or html_date is not None
-            pub_date = self.check_freshness(html_date)
-            date_inferred = pub_date is not None
-        if not pub_date and full_text:
-            pub_date = self.check_freshness(infer_content_freshness(full_text))
-            date_inferred = pub_date is not None
-        if not pub_date:
-            if has_source_date:
-                # Source stated a date but it failed the 24h gate (all heuristics missed):
-                # strictly stale - novelty stamping must not override a real date.
-                self._rollback_seen(norm_url, norm_title)
-                return None
-            if norm_url in self._prev_run_urls:
-                # Truly dateless, seen in a previous run: not new, reject.
-                self._rollback_seen(norm_url, norm_title)
-                return None
-            # Truly dateless, never seen before: treat as new since last run.
-            pub_date = datetime.now(timezone.utc)
-            date_inferred = True
-            logger.debug(f"Dateless entry treated as new-since-last-run: '{title}' ({source_name}).")
-        if date_inferred:
-            logger.debug(f"Publication date inferred heuristically for '{title}' ({source_name}).")
-
-        if source_name in self.stats:
-            self.stats[source_name]["total"] += 1
-            if is_full_text:
-                self.stats[source_name]["full_text"] += 1
-
-        summary, is_llm_summary = await self._build_summary(source_name, entry, title, full_text)
-
-        if source_name in self.stats:
-            if is_llm_summary:
-                self.stats[source_name]["llm_summary"] += 1
-            else:
-                self.stats[source_name]["rss_fallback"] += 1
-
-        return NewsRecord(
-            source=SourceMetadata(name=source_name, url=link),
-            content=NewsContent(title=title, published_date=pub_date, summary=summary[:settings.news_summary_max_len] if summary else None, full_text=full_text or summary or title),
+        return await self._finalize_entry(
+            source_name, entry, title, link, full_text, is_full_text, raw_html,
+            raw_feed_date, pub_date, norm_url, norm_title,
         )
 
     async def crawl_source(self, src: Dict[str, str]) -> List[NewsRecord]:

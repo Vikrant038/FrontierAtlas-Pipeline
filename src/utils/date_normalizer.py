@@ -106,23 +106,19 @@ def validate_freshness_24h(date_val: Any) -> Optional[datetime]:
     return dt if (dt and is_fresh_24h(dt)[0]) else None
 
 
-def extract_date_from_html(raw_html: str, page_url: str = "") -> Optional[datetime]:
-    """Extract and normalize publication date from HTML metadata tags, JSON-LD, or URL patterns."""
-    if not raw_html:
+def _date_from_url(page_url: str) -> Optional[datetime]:
+    """Tier 1: /YYYY/MM/DD/ or /YYYY-MM-DD/ date encoded in the page URL."""
+    if not page_url:
         return None
+    url_match = re.search(r"/(\d{4})[/-](\d{1,2})[/-](\d{1,2})/", page_url)
+    if not url_match:
+        return None
+    y, m, d = url_match.groups()
+    return parse_datetime_to_utc(f"{y}-{int(m):02d}-{int(d):02d}")
 
-    # 1. URL pattern match: /YYYY/MM/DD/ or /YYYY-MM-DD/
-    if page_url:
-        url_match = re.search(r"/(\d{4})[/-](\d{1,2})[/-](\d{1,2})/", page_url)
-        if url_match:
-            y, m, d = url_match.groups()
-            parsed_url_date = parse_datetime_to_utc(f"{y}-{int(m):02d}-{int(d):02d}")
-            if parsed_url_date:
-                return parsed_url_date
 
-    soup = BeautifulSoup(raw_html[:25000], "html.parser")
-
-    # 2. Meta tags (OpenGraph, Article, Dublin Core)
+def _date_from_meta_tags(soup) -> Optional[datetime]:
+    """Tier 2: OpenGraph/Article/Dublin Core meta tags."""
     meta_keys = [
         ("property", "article:published_time"),
         ("property", "og:article:published_time"),
@@ -140,8 +136,11 @@ def extract_date_from_html(raw_html: str, page_url: str = "") -> Optional[dateti
             parsed = parse_datetime_to_utc(tag["content"])
             if parsed:
                 return parsed
+    return None
 
-    # 3. JSON-LD structured data
+
+def _date_from_json_ld(soup) -> Optional[datetime]:
+    """Tier 3: JSON-LD structured-data date fields."""
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
         try:
             payload = json.loads(script.string or "")
@@ -155,16 +154,29 @@ def extract_date_from_html(raw_html: str, page_url: str = "") -> Optional[dateti
                                 return parsed
         except Exception:
             continue
+    return None
 
-    # 4. <time> tags with datetime attribute
+
+def _date_from_time_tags(soup) -> Optional[datetime]:
+    """Tier 4: <time> elements with datetime attributes or text."""
     for time_tag in soup.find_all("time"):
         dt_val = time_tag.get("datetime") or time_tag.get_text()
         if dt_val:
             parsed = parse_datetime_to_utc(dt_val)
             if parsed:
                 return parsed
-
     return None
+
+
+def extract_date_from_html(raw_html: str, page_url: str = "") -> Optional[datetime]:
+    """Extract publication date from HTML via URL, meta, JSON-LD, and <time> tiers."""
+    if not raw_html:
+        return None
+    parsed = _date_from_url(page_url)
+    if parsed:
+        return parsed
+    soup = BeautifulSoup(raw_html[:25000], "html.parser")
+    return _date_from_meta_tags(soup) or _date_from_json_ld(soup) or _date_from_time_tags(soup)
 
 
 def infer_content_freshness(content: str, fallback_now: Optional[datetime] = None) -> Optional[datetime]:

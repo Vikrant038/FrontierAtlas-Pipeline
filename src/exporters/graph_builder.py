@@ -32,29 +32,16 @@ class KnowledgeGraphBuilder:
             self.graph.add_node(s_node, label=name, node_type="STARTUP", source=source_url)
         return s_node
 
-    def build_graph(
-        self,
-        startups: Optional[List[StartupRecord]] = None,
-        products: Optional[List[ProductRecord]] = None,
-        papers: Optional[List[ResearchPaperRecord]] = None,
-        jobs: Optional[List[JobRecord]] = None,
-        news: Optional[List[NewsRecord]] = None,
-    ) -> nx.DiGraph:
-        """Populate graph with entities and their directed relationships."""
-        self.graph.clear()
-
-        # 1. Add Startups
-        for s in (startups or []):
-            self._add_startup(s.content.entityName, s.source.url)
-
-        # 2. Add Products & Edge: Startup -> SHIPPED -> Product
+    def _add_products(self, products: Optional[List[ProductRecord]]) -> None:
+        """Add Products with Startup -> SHIPPED -> Product edges."""
         for p in (products or []):
             s_node = self._add_startup(p.content.startupName)
             p_node = f"Product:{p.content.productName}"
             self.graph.add_node(p_node, label=p.content.productName, node_type="PRODUCT", pricing=to_str(p.content.pricingModel))
             self.graph.add_edge(s_node, p_node, relationship="SHIPPED")
 
-        # 3. Add Research Papers & GitHub Repos: Paper -> IMPLEMENTS -> Repo
+    def _add_papers(self, papers: Optional[List[ResearchPaperRecord]]) -> None:
+        """Add Research Papers with Paper -> IMPLEMENTED_IN -> Repo edges."""
         for r in (papers or []):
             paper_node = f"Paper:{r.content.paper_url}"
             self.graph.add_node(paper_node, label=r.content.title, node_type="RESEARCH_PAPER", paper_url=r.content.paper_url)
@@ -63,7 +50,8 @@ class KnowledgeGraphBuilder:
                 self.graph.add_node(repo_node, label=r.content.github_url, node_type="GITHUB_REPO", stars=r.content.github_stars or 0)
                 self.graph.add_edge(paper_node, repo_node, relationship="IMPLEMENTED_IN")
 
-        # 4. Add Jobs & Edge: Startup -> HIRED_VIA -> Job
+    def _add_jobs(self, jobs: Optional[List[JobRecord]]) -> None:
+        """Add Jobs with Startup -> HIRED_VIA -> Job edges."""
         for j in (jobs or []):
             s_node = self._add_startup(j.content.company)
             j_title = f"{j.content.company} - {j.content.title}"
@@ -71,7 +59,8 @@ class KnowledgeGraphBuilder:
             self.graph.add_node(j_node, label=j_title, node_type="JOB", role_family=to_str(j.content.role_family))
             self.graph.add_edge(s_node, j_node, relationship="HIRED_VIA")
 
-        # 5. Add News & Edges: Startup -> MENTIONED_IN -> News or Publisher -> PUBLISHED -> News
+    def _add_news(self, news: Optional[List[NewsRecord]], startups: Optional[List[StartupRecord]]) -> None:
+        """Add News with Startup -> MENTIONED_IN edges, falling back to Publisher -> PUBLISHED."""
         for n in (news or []):
             n_node = f"News:{n.content.title}"
             self.graph.add_node(n_node, label=n.content.title, node_type="NEWS_SIGNAL")
@@ -88,6 +77,22 @@ class KnowledgeGraphBuilder:
                     self.graph.add_node(pub_node, label=n.source.name, node_type="PUBLISHER")
                 self.graph.add_edge(pub_node, n_node, relationship="PUBLISHED")
 
+    def build_graph(
+        self,
+        startups: Optional[List[StartupRecord]] = None,
+        products: Optional[List[ProductRecord]] = None,
+        papers: Optional[List[ResearchPaperRecord]] = None,
+        jobs: Optional[List[JobRecord]] = None,
+        news: Optional[List[NewsRecord]] = None,
+    ) -> nx.DiGraph:
+        """Populate graph with entities and their directed relationships."""
+        self.graph.clear()
+        for s in (startups or []):
+            self._add_startup(s.content.entityName, s.source.url)
+        self._add_products(products)
+        self._add_papers(papers)
+        self._add_jobs(jobs)
+        self._add_news(news, startups)
         logger.info(f"Knowledge Graph constructed: {self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges.")
         return self.graph
 

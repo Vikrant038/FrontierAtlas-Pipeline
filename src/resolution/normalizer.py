@@ -125,8 +125,11 @@ class EntityResolver:
         lower_cleaned: str,
         normalized: str,
         domain: str,
+        entities: Optional[list] = None,
     ) -> Tuple[Optional[Tuple[str, MatchMethodEnum, float]], List[Tuple[str, float]]]:
-        """Check Tiers 0, 1A, 1B, and 2. Returns (match_result, top_candidates)."""
+        """Check Tiers 0, 1A, 1B, and 2. Returns (match_result, top_candidates).
+        `entities` freezes the registry for worker-thread calls (the async path
+        snapshots it so a concurrent learn cannot mutate the set mid-iteration)."""
         if not cleaned:
             return ("Unknown", MatchMethodEnum.MANUAL_OVERRIDE, 0.0), []
 
@@ -139,9 +142,10 @@ class EntityResolver:
         if normalized in self.normalized_map:
             return (self.normalized_map[normalized], MatchMethodEnum.NORMALIZATION_EXACT, 1.00), []
 
+        registry = entities if entities is not None else self.canonical_entities
         top_matches = process.extract(
             cleaned,
-            self.canonical_entities,
+            registry,
             scorer=fuzz.token_sort_ratio,
             limit=3,
         )
@@ -228,6 +232,19 @@ class EntityResolver:
         self.audit_log.append(log)
         return canonical, log
 
+    def _deterministic_check_threaded(
+        self,
+        cleaned: str,
+        lower_cleaned: str,
+        normalized: str,
+        domain: str,
+    ) -> Tuple[Optional[Tuple[str, MatchMethodEnum, float]], List[Tuple[str, float]]]:
+        """Worker-thread variant of the deterministic tier check running against a frozen
+        registry snapshot, so the O(registry) fuzzy scan never blocks the event loop."""
+        return self._check_deterministic_tiers(
+            cleaned, lower_cleaned, normalized, domain, entities=list(self.canonical_entities)
+        )
+
     async def resolve_async(
         self,
         raw_name: str,
@@ -236,7 +253,9 @@ class EntityResolver:
     ) -> Tuple[str, EntityResolutionLog]:
         """Asynchronous entity resolution entrypoint with Tier 3 LLM fallback."""
         cleaned, lower_cleaned, normalized, domain = self._prepare(raw_name, source_url)
-        det_result, top_matches = self._check_deterministic_tiers(cleaned, lower_cleaned, normalized, domain)
+        det_result, top_matches = await asyncio.to_thread(
+            self._deterministic_check_threaded, cleaned, lower_cleaned, normalized, domain
+        )
         if det_result is not None:
             canonical, method, conf = det_result
         else:

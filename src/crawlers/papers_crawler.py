@@ -49,8 +49,9 @@ class ResearchPapersCrawler(TargetedCrawler):
     def __init__(self, target_count: int = 1000, **kwargs):
         super().__init__(target_count=target_count, **kwargs)
         self._last_arxiv_time: float = 0.0
-        self._last_github_time: float = 0.0
-        self._github_pace_lock = asyncio.Lock()
+        # Per-token GitHub pacing slots: each pooled token paces on its own key so
+        # N tokens allow N interleaved lookups; "" is the shared anonymous slot.
+        self._github_slots: Dict[str, float] = {}
         self._use_cdn = False
         # Sentinel backs off star enrichment for one hour after quota exhaustion
         # (prevents thousands of doomed requests in anonymous mode: 60 req/hr cap).
@@ -71,15 +72,19 @@ class ResearchPapersCrawler(TargetedCrawler):
         """Seconds to sleep so consecutive requests stay >= interval apart."""
         return max(0.0, interval - (time.monotonic() - last_time))
 
-    async def _pace_github(self) -> None:
-        """Leaky-bucket pacing for GitHub API, safe under concurrent asyncio.gather enrichment."""
-        # Serialize the check-then-sleep-then-stamp sequence: concurrent enrich
-        # tasks each reserve a distinct slot spaced by the minimum interval.
-        async with self._github_pace_lock:
-            await asyncio.sleep(
-                self._seconds_until_slot(self._last_github_time, settings.github_interval_seconds)
-            )
-            self._last_github_time = time.monotonic()
+    async def _pace_github(self, token: Optional[str] = None) -> None:
+        """Reserve the next pacing slot for a GitHub token (or the anonymous '' slot).
+        Each token has its own slot, so pooled tokens run interleaved lookups while a
+        single token keeps the exact 1-per-interval cadence. The reserve is atomic:
+        no await between reading the slot and writing the reservation."""
+        slot_key = token or ""
+        interval = settings.github_interval_seconds
+        now = time.monotonic()
+        fire_at = max(now, self._github_slots.get(slot_key, 0.0))
+        self._github_slots[slot_key] = fire_at + interval
+        wait = fire_at - now
+        if wait > 0:
+            await asyncio.sleep(wait)
 
     async def _fetch_stars(self, repo_path: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
         """GitHub repository and star lookup with pacing, token-pool rotation, and quota-exhaustion backoff."""
@@ -101,7 +106,7 @@ class ResearchPapersCrawler(TargetedCrawler):
         if token is None:
             self._anonymous_lookups += 1
 
-        await self._pace_github()
+        await self._pace_github(token)
         try:
             # GitHub API 403 = quota exhaustion, not fingerprint blocking; TLS retry cannot help.
             data = await self.fetch_json(
@@ -208,23 +213,28 @@ class ResearchPapersCrawler(TargetedCrawler):
             (self._parse_feed_entry(e) for e in getattr(feed, "entries", [])), limit
         )
 
+    async def _query_cdn_category(self, cat: str, limit: int) -> List[Dict[str, Any]]:
+        """Fetch and parse a single CDN category feed (helper for parallel category harvest)."""
+        entries = await self.fetch_feed(f"https://rss.arxiv.org/rss/{cat}")
+        return self._collect_until_limit((self._parse_feed_entry(e) for e in entries), limit)
+
     async def _query_arxiv_cdn(self, limit: int) -> List[Dict[str, Any]]:
-        """Harvest fresh papers from Fastly CDN-cached Arxiv RSS feeds."""
+        """Harvest fresh papers from Fastly CDN-cached Arxiv RSS feeds, categories in parallel."""
+        cats = [c.strip() for c in settings.arxiv_cdn_categories.split(",") if c.strip()]
         results: List[Dict[str, Any]] = []
-        for cat in settings.arxiv_cdn_categories.split(","):
-            cat = cat.strip()
+        if not cats:
+            return results
+        per_cat = await asyncio.gather(
+            *(self._query_cdn_category(cat, limit) for cat in cats), return_exceptions=True
+        )
+        for cat, batch in zip(cats, per_cat):
+            if isinstance(batch, Exception):
+                logger.warning(f"Arxiv CDN RSS failed for {cat}: {repr(batch)}")
+                continue
+            results.extend(batch)
             if len(results) >= limit:
                 break
-            try:
-                entries = await self.fetch_feed(f"https://rss.arxiv.org/rss/{cat}")
-                results.extend(
-                    self._collect_until_limit(
-                        (self._parse_feed_entry(e) for e in entries), limit - len(results)
-                    )
-                )
-            except Exception as exc:
-                logger.warning(f"Arxiv CDN RSS failed for {cat}: {repr(exc)}")
-        return results
+        return results[:limit]
 
     async def _query_hf_papers(self, limit: int) -> List[Dict[str, Any]]:
         """Harvest fresh papers from Hugging Face Daily Papers API with verified code repos."""
@@ -292,15 +302,31 @@ class ResearchPapersCrawler(TargetedCrawler):
                 logger.warning(f"Arxiv API persistent outage ({repr(exc)}). Switching to CDN RSS failover.")
                 self._use_cdn = True
 
-        cdn_papers = await self._query_arxiv_cdn(limit)
-        if len(cdn_papers) < limit:
-            hf_papers = await self._query_hf_papers(limit - len(cdn_papers))
-            cdn_papers.extend(hf_papers)
-        if len(cdn_papers) < limit:
-            page = (start // 100) + 1
-            alex_papers = await self._query_openalex_papers(page, limit - len(cdn_papers))
-            cdn_papers.extend(alex_papers)
-        return cdn_papers
+        # CDN -> HF -> OpenAlex supplement sources run concurrently (each is a single
+        # request); results are merged in that priority order, deduplicated by URL.
+        page = (start // 100) + 1
+        cdn_papers, hf_papers, alex_papers = await asyncio.gather(
+            self._query_arxiv_cdn(limit),
+            self._query_hf_papers(limit),
+            self._query_openalex_papers(page, limit),
+            return_exceptions=True,
+        )
+        merged: List[Dict[str, Any]] = []
+        seen_urls: set = set()
+        for batch in (cdn_papers, hf_papers, alex_papers):
+            if isinstance(batch, Exception):
+                logger.warning(f"Paper supplement source failed: {repr(batch)}")
+                continue
+            for candidate in batch:
+                url = candidate.get("paper_url")
+                if url in seen_urls:
+                    continue
+                if url:
+                    seen_urls.add(url)
+                merged.append(candidate)
+                if len(merged) >= limit:
+                    return merged
+        return merged
 
     async def enrich_paper(self, paper: Dict[str, Any]) -> ResearchPaperRecord:
         """Enrich paper metadata with live GitHub repository stars."""
@@ -327,6 +353,25 @@ class ResearchPapersCrawler(TargetedCrawler):
                 rec.content.github_stars = stars
             except Exception as exc:
                 logger.debug(f"Background star enrichment error for {repo_path}: {exc}")
+
+    async def _spawn_enrichment(
+        self,
+        batch_to_enrich: List[Tuple[ResearchPaperRecord, str]],
+        enrich_tasks: List[asyncio.Task],
+    ) -> List[asyncio.Task]:
+        """Start a background enrichment task for a batch and prune finished tasks
+        once 20 are in flight (keeps the pool bounded without blocking ingestion).
+        Returns the surviving task list."""
+        if not batch_to_enrich or self._github_quota_blocked():
+            return enrich_tasks
+        enrich_tasks.append(asyncio.create_task(self._enrich_batch(batch_to_enrich)))
+        if len(enrich_tasks) < 20:
+            return enrich_tasks
+        done, pending = await asyncio.wait(enrich_tasks, timeout=0)
+        for t in done:
+            if not t.cancelled() and t.exception() is not None:
+                logger.debug(f"Enrichment task failed: {t.exception()!r}")
+        return list(pending)
 
     async def crawl(self) -> List[ResearchPaperRecord]:
         """Execute concurrent papers acquisition with decoupled ingestion and enrichment."""
@@ -363,15 +408,7 @@ class ResearchPapersCrawler(TargetedCrawler):
                     break
 
             # 2. Asynchronously enrich GitHub stars in background without blocking paper ingestion
-            if batch_to_enrich and not self._github_quota_blocked():
-                enrich_task = asyncio.create_task(self._enrich_batch(batch_to_enrich))
-                enrich_tasks.append(enrich_task)
-                if len(enrich_tasks) >= 20:
-                    # Prune finished enrichment tasks without blocking ingestion.
-                    done, enrich_tasks = await asyncio.wait(enrich_tasks, timeout=0)
-                    for t in done:
-                        if not t.cancelled() and t.exception() is not None:
-                            logger.debug(f"Enrichment task failed: {t.exception()!r}")
+            enrich_tasks = await self._spawn_enrichment(batch_to_enrich, enrich_tasks)
 
             offset += len(papers)
             logger.info(

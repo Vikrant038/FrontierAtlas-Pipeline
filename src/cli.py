@@ -284,92 +284,67 @@ def setup_signal_handlers(loop: asyncio.AbstractEventLoop, on_shutdown: Optional
             logger.debug(f"Could not register signal handler for {sig.name}: {exc}")
 
 
-async def run_pipeline(
-    run_phase1: bool = True,
-    run_phase2: bool = True,
-    target_count: int = 1000,
-    output_xlsx: str = "exports/FrontierAtlas_Intelligence.xlsx",
-    upload_sheets: bool = False,
-    progress_interval: float = 180.0,
-):
-    """Execute async pipeline phases and export structured deliverables."""
-    loop = asyncio.get_running_loop()
-    setup_signal_handlers(loop)
-    console.print("[bold blue]🚀 Launching FrontierAtlas AI Data Intelligence Pipeline...[/bold blue]")
-
-    run_started = time.monotonic()
-    run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    startups, products, papers, jobs, news = [], [], [], [], []
-
+def _start_background_tasks(progress_interval: float, run_phase1: bool, run_phase2: bool) -> Tuple[Optional[asyncio.Task], asyncio.Task]:
+    """Start the live progress monitor (when enabled) and the periodic registry save."""
     monitor_task = (
         asyncio.create_task(_progress_monitor(progress_interval, run_phase1, run_phase2))
         if progress_interval > 0
         else None
     )
     cache_save_task = asyncio.create_task(_periodic_cache_save())
+    return monitor_task, cache_save_task
 
-    try:
-        phase1_tasks = []
-        if run_phase1:
-            console.print(f"[yellow]Launching Phase I: Bulk Acquisition (Target: {target_count})...[/yellow]")
-            phase1_tasks = [
-                _crawl("papers", ResearchPapersCrawler, target_count=target_count,
-                       wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
-                _crawl("startups", StartupsCrawler, target_count=target_count,
-                       wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
-                _crawl("products", ProductsCrawler, target_count=target_count,
-                       wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
-            ]
 
-        phase2_tasks = []
-        if run_phase2:
-            console.print("[yellow]Launching Phase II: 24h Signal Monitoring (5 News + 5 Job Boards)...[/yellow]")
-            phase2_tasks = [
-                _crawl("news", NewsCrawler),
-                _crawl("jobs", JobsCrawler),
-            ]
-
-        if phase1_tasks and phase2_tasks:
-            results = await _safe_gather([*phase1_tasks, *phase2_tasks])
-            papers, startups, products = results[0], results[1], results[2]
-            news, jobs = results[3], results[4]
-        elif phase1_tasks:
-            papers, startups, products = await _safe_gather(phase1_tasks)
-        elif phase2_tasks:
-            news, jobs = await _safe_gather(phase2_tasks)
-
-    except asyncio.CancelledError:
-        console.print("[yellow]Pipeline execution interrupted. Saving entity cache and exiting...[/yellow]")
-        entity_resolver.save_cache()
-        _write_run_report(
-            run_id=run_id,
-            duration_s=time.monotonic() - run_started,
-            status="interrupted",
-            counts={name: _crawler_progress(name)[0] for name in ("papers", "startups", "products", "news", "jobs")},
-            target_count=target_count,
-            resolution_log_rows=len(entity_resolver.audit_log),
-            phase1=run_phase1,
-            phase2=run_phase2,
-        )
-        raise
-    finally:
-        if monitor_task is not None:
-            monitor_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await monitor_task
-        cache_save_task.cancel()
+async def _cancel_background_tasks(monitor_task: Optional[asyncio.Task], cache_save_task: asyncio.Task) -> None:
+    """Cancel the live progress monitor and periodic registry-save tasks (always on exit)."""
+    if monitor_task is not None:
+        monitor_task.cancel()
         with suppress(asyncio.CancelledError):
-            await cache_save_task
+            await monitor_task
+    cache_save_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await cache_save_task
 
-    # Phase IV: Entity Resolution Audit Logs
-    # Every resolve() call during crawls already appended to the central audit log.
-    # Re-resolving here would double-log entries.
-    logs = entity_resolver.audit_log
 
-    # Persist learned entities & domain grounding so subsequent runs start warm.
-    await asyncio.to_thread(entity_resolver.save_cache)
+async def _run_crawlers(run_phase1: bool, run_phase2: bool, target_count: int) -> Dict[str, list]:
+    """Build and execute the Phase I/II crawler set concurrently.
+    Returns per-vertical record lists (empty for skipped phases); propagates
+    CancelledError so the caller can persist state and report interruption."""
+    papers, startups, products, news, jobs = [], [], [], [], []
+    phase1_tasks = []
+    if run_phase1:
+        console.print(f"[yellow]Launching Phase I: Bulk Acquisition (Target: {target_count})...[/yellow]")
+        phase1_tasks = [
+            _crawl("papers", ResearchPapersCrawler, target_count=target_count,
+                   wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
+            _crawl("startups", StartupsCrawler, target_count=target_count,
+                   wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
+            _crawl("products", ProductsCrawler, target_count=target_count,
+                   wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
+        ]
+    phase2_tasks = []
+    if run_phase2:
+        console.print("[yellow]Launching Phase II: 24h Signal Monitoring (5 News + 5 Job Boards)...[/yellow]")
+        phase2_tasks = [
+            _crawl("news", NewsCrawler),
+            _crawl("jobs", JobsCrawler),
+        ]
+    if phase1_tasks and phase2_tasks:
+        results = await _safe_gather([*phase1_tasks, *phase2_tasks])
+        papers, startups, products = results[0], results[1], results[2]
+        news, jobs = results[3], results[4]
+    elif phase1_tasks:
+        papers, startups, products = await _safe_gather(phase1_tasks)
+    elif phase2_tasks:
+        news, jobs = await _safe_gather(phase2_tasks)
+    return {"papers": papers, "startups": startups, "products": products, "news": news, "jobs": jobs}
 
-    # Phase VI: Export Deliverables — the three exports are independent, so run them concurrently
+
+async def _run_exports(
+    startups: List[Any], products: List[Any], papers: List[Any],
+    jobs: List[Any], news: List[Any], logs: List[Any], output_xlsx: str,
+) -> Dict[str, Any]:
+    """Execute the three independent deliverable exports concurrently; returns graph metrics."""
     console.print("[yellow]Executing Phase VI: Exporting 6-Tab Excel, CSVs & Graph Construction...[/yellow]")
     exporter = ExcelExporter()
     csv_exporter = CSVExporter()
@@ -382,9 +357,70 @@ async def run_pipeline(
         asyncio.to_thread(graph_builder.build_graph, startups=startups, products=products,
                           papers=papers, jobs=jobs, news=news),
     )
-    metrics = graph_builder.get_summary_metrics()
+    return graph_builder.get_summary_metrics()
 
-    # Telemetry summary table
+
+def _report_interrupted(run_id: str, run_started: float, target_count: int, run_phase1: bool, run_phase2: bool) -> None:
+    """Persist an interrupted-run report from the CancelledError handler."""
+    console.print("[yellow]Pipeline execution interrupted. Saving entity cache and exiting...[/yellow]")
+    entity_resolver.save_cache()
+    _write_run_report(
+        run_id=run_id,
+        duration_s=time.monotonic() - run_started,
+        status="interrupted",
+        counts={name: _crawler_progress(name)[0] for name in ("papers", "startups", "products", "news", "jobs")},
+        target_count=target_count,
+        resolution_log_rows=len(entity_resolver.audit_log),
+        phase1=run_phase1,
+        phase2=run_phase2,
+    )
+
+
+async def _finalize_run(
+    run_id: str, run_started: float, run_phase1: bool, run_phase2: bool, target_count: int,
+    upload_sheets: bool, startups: List[Any], products: List[Any], papers: List[Any],
+    news: List[Any], jobs: List[Any], logs: List[Any],
+) -> bool:
+    """Optional Sheets upload, stale-source warnings, shortfall gating, and the run report."""
+    if upload_sheets:
+        await asyncio.to_thread(
+            _handle_sheets_upload,
+            startups=startups,
+            products=products,
+            papers=papers,
+            jobs=jobs,
+            news=news,
+            logs=logs,
+        )
+    _warn_stale_sources()
+    shortfall = run_phase1 and any(len(x) < target_count for x in (startups, products, papers))
+    if shortfall:
+        console.print("[bold red]⚠️  Phase I target shortfall detected; exit code will be 1.[/bold red]")
+    _write_run_report(
+        run_id=run_id,
+        duration_s=time.monotonic() - run_started,
+        status="shortfall" if shortfall else "completed",
+        counts={
+            "startups": len(startups),
+            "products": len(products),
+            "papers": len(papers),
+            "news": len(news),
+            "jobs": len(jobs),
+        },
+        target_count=target_count,
+        resolution_log_rows=len(logs),
+        phase1=run_phase1,
+        phase2=run_phase2,
+    )
+    return not shortfall
+
+
+def _render_summary(
+    run_phase1: bool, run_phase2: bool, target_count: int,
+    startups: List[Any], products: List[Any], papers: List[Any],
+    news: List[Any], jobs: List[Any], metrics: Dict[str, Any], output_xlsx: str,
+) -> None:
+    """Render the execution summary table, LLM telemetry, and deliverable note."""
     table = Table(title="FrontierAtlas Pipeline Execution Summary")
     table.add_column("Entity / Phase", style="cyan", no_wrap=True)
     table.add_column("Count Collected", style="magenta")
@@ -411,44 +447,57 @@ async def run_pipeline(
     ]
     for label, count, status in rows:
         table.add_row(label, str(count), status)
-
     console.print(table)
     _display_llm_telemetry()
     console.print(f"[bold green]✨ Multi-Tab Excel exported to: {output_xlsx}[/bold green]")
 
-    if upload_sheets:
-        await asyncio.to_thread(
-            _handle_sheets_upload,
-            startups=startups,
-            products=products,
-            papers=papers,
-            jobs=jobs,
-            news=news,
-            logs=logs,
-        )
 
-    _warn_stale_sources()
+async def run_pipeline(
+    run_phase1: bool = True,
+    run_phase2: bool = True,
+    target_count: int = 1000,
+    output_xlsx: str = "exports/FrontierAtlas_Intelligence.xlsx",
+    upload_sheets: bool = False,
+    progress_interval: float = 180.0,
+):
+    """Execute async pipeline phases and export structured deliverables."""
+    loop = asyncio.get_running_loop()
+    setup_signal_handlers(loop)
+    console.print("[bold blue]🚀 Launching FrontierAtlas AI Data Intelligence Pipeline...[/bold blue]")
 
-    shortfall = run_phase1 and any(len(x) < target_count for x in (startups, products, papers))
-    if shortfall:
-        console.print("[bold red]⚠️  Phase I target shortfall detected; exit code will be 1.[/bold red]")
-    _write_run_report(
-        run_id=run_id,
-        duration_s=time.monotonic() - run_started,
-        status="shortfall" if shortfall else "completed",
-        counts={
-            "startups": len(startups),
-            "products": len(products),
-            "papers": len(papers),
-            "news": len(news),
-            "jobs": len(jobs),
-        },
-        target_count=target_count,
-        resolution_log_rows=len(logs),
-        phase1=run_phase1,
-        phase2=run_phase2,
+    run_started = time.monotonic()
+    run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    monitor_task, cache_save_task = _start_background_tasks(progress_interval, run_phase1, run_phase2)
+
+    try:
+        collected = await _run_crawlers(run_phase1, run_phase2, target_count)
+    except asyncio.CancelledError:
+        _report_interrupted(run_id, run_started, target_count, run_phase1, run_phase2)
+        raise
+    finally:
+        await _cancel_background_tasks(monitor_task, cache_save_task)
+
+    startups, products, papers, news, jobs = (
+        collected[k] for k in ("startups", "products", "papers", "news", "jobs")
     )
-    return not shortfall
+
+    # Phase IV: Entity Resolution Audit Logs
+    # Every resolve() call during crawls already appended to the central audit log.
+    # Re-resolving here would double-log entries.
+    logs = entity_resolver.audit_log
+
+    # Persist learned entities & domain grounding so subsequent runs start warm.
+    await asyncio.to_thread(entity_resolver.save_cache)
+
+    metrics = await _run_exports(startups=startups, products=products, papers=papers,
+                                 jobs=jobs, news=news, logs=logs, output_xlsx=output_xlsx)
+    _render_summary(run_phase1, run_phase2, target_count, startups, products, papers,
+                    news, jobs, metrics, output_xlsx)
+
+    return await _finalize_run(
+        run_id, run_started, run_phase1, run_phase2, target_count,
+        upload_sheets, startups, products, papers, news, jobs, logs,
+    )
 
 
 DEFAULT_OUTPUT_XLSX = "exports/FrontierAtlas_Intelligence.xlsx"

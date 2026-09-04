@@ -108,3 +108,84 @@ def test_warn_stale_sources_silent_when_all_sources_fresh(capsys):
 
     # Assert
     assert "Stale source" not in out
+
+
+@pytest.mark.asyncio
+async def test_finalize_run_reports_shortfall_and_completed():
+    # Arrange
+    from src.cli import _finalize_run
+
+    base = {
+        "run_id": "probe", "run_started": 0.0, "run_phase1": True, "run_phase2": False,
+        "target_count": 3, "upload_sheets": False,
+        "news": [], "jobs": [], "logs": [],
+    }
+
+    with patch("src.cli._handle_sheets_upload") as mock_upload, patch("src.cli._warn_stale_sources") as mock_warn, patch("src.cli._write_run_report") as mock_report:
+        # Act: Phase I falls short of target -> not ok, report marks shortfall
+        ok = await _finalize_run(**base, startups=[1], products=[2, 3], papers=[])
+
+        # Assert
+        assert ok is False
+        assert mock_report.call_args.kwargs["status"] == "shortfall"
+        mock_warn.assert_called_once()
+
+        # Act: full target -> ok, report marks completed
+        ok_full = await _finalize_run(**base, startups=[1, 2, 3], products=[1, 2, 3], papers=[1, 2, 3])
+
+        # Assert
+        assert ok_full is True
+        assert mock_report.call_args.kwargs["status"] == "completed"
+        mock_upload.assert_not_called()
+
+
+def test_cli_main_keyboard_interrupt_graceful_exit():
+    # Arrange
+    from click.testing import CliRunner
+    from src.cli import main
+    runner = CliRunner()
+
+    async def _mock_interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    with patch("src.cli.run_pipeline", side_effect=_mock_interrupt):
+        # Act
+        result = runner.invoke(main, ["--phase", "1", "--target", "10"])
+
+        # Assert
+        assert result.exit_code == 0
+        assert "Pipeline stopped gracefully" in result.output
+
+
+def test_cli_main_cancelled_error_graceful_exit():
+    # Arrange
+    from click.testing import CliRunner
+    from src.cli import main
+    runner = CliRunner()
+
+    async def _mock_cancelled(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    with patch("src.cli.run_pipeline", side_effect=_mock_cancelled):
+        # Act
+        result = runner.invoke(main, ["--phase", "2", "--target", "5"])
+
+        # Assert
+        assert result.exit_code == 0
+        assert "Pipeline stopped gracefully" in result.output
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_cancellation_persists_interrupted_report():
+    # Arrange
+    with patch("src.cli._run_crawlers", side_effect=asyncio.CancelledError()):
+        with patch("src.cli.entity_resolver.save_cache") as mock_save:
+            with patch("src.cli._write_run_report") as mock_report:
+                # Act & Assert
+                with pytest.raises(asyncio.CancelledError):
+                    await run_pipeline(run_phase1=True, run_phase2=False, target_count=5)
+
+                mock_save.assert_called_once()
+                mock_report.assert_called_once()
+                assert mock_report.call_args.kwargs["status"] == "interrupted"
+

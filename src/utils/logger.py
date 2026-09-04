@@ -11,7 +11,7 @@ from loguru import logger
 
 # Sensitive field keywords and credential pattern to mask automatically
 SENSITIVE_KEY_RE = re.compile(
-    r"(?i)(password|token|secret|apikey|authorization|jwt|creditcard|ssn)"
+    r"(?i)(password|token|secret|api_?key|authorization|jwt|creditcard|ssn)"
 )
 CREDENTIAL_INLINE_RE = re.compile(
     r"(?i)(bearer\s+[a-zA-Z0-9_\-\.]{15,}|(api_?key|token|secret)\s*[:=]\s*['\"]?[a-zA-Z0-9_\-\.]{8,}['\"]?)"

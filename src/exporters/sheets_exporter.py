@@ -287,24 +287,8 @@ class GoogleSheetsExporter:
                 "news": news,
                 "logs": logs,
             }
-
-            for key, (tab_title, _, headers) in ENTITY_SPECS.items():
-                records = datasets.get(key) or []
-                record_rows = [r.to_row() if hasattr(r, "to_row") else r for r in records]
-                all_rows = [headers] + record_rows
-
-                self._prepare_worksheet(
-                    spreadsheet=spreadsheet,
-                    title=tab_title,
-                    num_rows=len(all_rows),
-                    num_cols=len(headers),
-                )
-                self._batch_update_values(
-                    spreadsheet=spreadsheet,
-                    title=tab_title,
-                    all_rows=all_rows,
-                )
-
+            for key in ENTITY_SPECS:
+                self._upload_dataset(spreadsheet, key, datasets.get(key) or [])
             self._cleanup_default_sheet(spreadsheet)
             self._share_with_evaluator(spreadsheet)
 
@@ -313,3 +297,16 @@ class GoogleSheetsExporter:
         except Exception as exc:
             logger.error(f"Google Sheets export failed: {exc}")
             return None
+
+    def _upload_dataset(self, spreadsheet, key: str, records: List[Any]) -> None:
+        """Prepare and batch-write one dataset tab (headers + serialized rows)."""
+        tab_title, _, headers = ENTITY_SPECS[key]
+        record_rows = [r.to_row() if hasattr(r, "to_row") else r for r in records]
+        all_rows = [headers] + record_rows
+        self._prepare_worksheet(
+            spreadsheet=spreadsheet,
+            title=tab_title,
+            num_rows=len(all_rows),
+            num_cols=len(headers),
+        )
+        self._batch_update_values(spreadsheet=spreadsheet, title=tab_title, all_rows=all_rows)

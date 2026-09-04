@@ -3,6 +3,9 @@ Unit tests for NewsCrawler freshness filtering, URL deduplication, and article e
 Follows AAA pattern with offline respx mocking and freezegun per CODING_STANDARDS.md.
 """
 
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 import respx
 import httpx
@@ -379,3 +382,278 @@ async def test_hacker_news_summary_never_contains_html_tags():
     assert "Article URL:" not in summary, f"HN RSS metadata found in summary: {summary!r}"
     # Summary must be non-empty meaningful text (at minimum the title)
     assert len(summary) >= 5
+
+
+@pytest.mark.asyncio
+async def test_news_finalize_entry_rolls_back_stale_and_builds_fresh():
+    # Arrange
+    crawler = NewsCrawler()
+    crawler.stats = {"Test Feed": {"total": 0, "full_text": 0, "llm_summary": 0, "rss_fallback": 0}}
+    crawler._build_summary = AsyncMock(return_value=("A sufficiently long summary text.", False))
+    crawler._rollback_seen = MagicMock()
+    stale_iso = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+
+    # Act (stale): a source-stated date that fails the 24h gate must be rejected
+    stale_record = await crawler._finalize_entry(
+        "Test Feed", None, "Old News", "https://example.com/stale", "", False, "",
+        stale_iso, None, "https://example.com/stale", "old-news",
+    )
+
+    # Assert (stale): rejected, dedup reservations rolled back, no record built
+    assert stale_record is None
+    crawler._rollback_seen.assert_called_once_with("https://example.com/stale", "old-news")
+
+    # Act (fresh): a truly dateless, unseen entry is novelty-stamped and built
+    fresh_record = await crawler._finalize_entry(
+        "Test Feed", None, "Brand New Announcement", "https://example.com/fresh", "", False, "",
+        None, None, "https://example.com/fresh", "brand-new-announcement",
+    )
+
+    # Assert (fresh): record built, stamped within the last minute, stats + summary recorded
+    assert fresh_record is not None
+    age = datetime.now(timezone.utc) - fresh_record.content.published_date
+    assert age.total_seconds() < 60
+    assert fresh_record.content.summary == "A sufficiently long summary text."
+    assert crawler.stats["Test Feed"]["total"] == 1
+    assert crawler.stats["Test Feed"]["rss_fallback"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Coverage for the remaining branches: source override, URL normalization
+# edges, HN article full-text path, summary/date resolution, and crawl tails.
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace as _NS
+
+from src.config import settings
+from src.crawlers.news_crawler import NEWS_SOURCES, NewsCrawler
+from src.llm.fallback_chain import llm_engine as news_llm_engine
+from src.llm.prompts import NewsSummarySchema
+from src.schemas.entities import NewsContent, NewsRecord, SourceMetadata
+
+
+def test_news_configured_sources_json_override(monkeypatch):
+    # A valid override replaces the built-in feed list entirely
+    monkeypatch.setattr(
+        settings, "news_sources_json",
+        '[{"name": "Custom Feed", "feed_url": "https://custom.example/rss"}, {"name": "No Url"}]',
+    )
+    sources = NewsCrawler._configured_sources()
+    assert sources == [{"name": "Custom Feed", "feed_url": "https://custom.example/rss"}]
+
+    # Empty / unparseable overrides fall back to the built-ins
+    monkeypatch.setattr(settings, "news_sources_json", "")
+    assert NewsCrawler._configured_sources() is NEWS_SOURCES
+    monkeypatch.setattr(settings, "news_sources_json", "{not json")
+    assert NewsCrawler._configured_sources() is NEWS_SOURCES
+
+
+def test_news_normalize_url_edge_cases():
+    norm = NewsCrawler._normalize_url
+    assert norm("") == ""
+    assert norm(None) == ""
+    assert norm(123) == ""
+    # Default-port stripping + param filtering + trailing-slash removal
+    assert norm("HTTPS://Example.com:443/path/?utm_source=x&ref=y#frag") == "https://example.com/path"
+    assert norm("http://example.com:80/") == "http://example.com/"
+    # Root path preserved
+    assert norm("https://example.com") == "https://example.com/"
+    # Kept params survive
+    assert norm("https://example.com/a?q=1&utm_campaign=z") == "https://example.com/a?q=1"
+
+
+def test_news_normalize_title_non_string():
+    assert NewsCrawler._normalize_title("") == ""
+    assert NewsCrawler._normalize_title(None) == ""
+    assert NewsCrawler._normalize_title(42) == ""
+
+
+def test_extract_hn_article_url_rejects_javascript_targets():
+    # Only a javascript: href exists -> rejected -> None (not a usable article URL)
+    html = '<p><a href="javascript:void(0)">click</a></p>'
+    assert NewsCrawler._extract_hn_article_url(html) is None
+    # Real external URL is still found when present alongside it
+    mixed = '<p><a href="javascript:void(0)">x</a><a href="https://arxiv.org/abs/2406.1">y</a></p>'
+    assert NewsCrawler._extract_hn_article_url(mixed) == "https://arxiv.org/abs/2406.1"
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+async def test_news_rollback_seen_removes_reserved_keys():
+    crawler = NewsCrawler()
+    crawler._seen_urls = {"https://example.com/a"}
+    crawler._seen_titles = ["title a"]
+    crawler._rollback_seen("https://example.com/a", "title a")
+    assert crawler._seen_urls == set()
+    assert crawler._seen_titles == []
+    # Missing title is a no-op
+    crawler._rollback_seen("https://example.com/a", "never added")
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+async def test_news_build_summary_llm_success_and_failure(monkeypatch):
+    crawler = NewsCrawler(sources=[{"name": "TechCrunch AI", "feed_url": "https://x/feed"}])
+    entry = _NS(summary="<p>RSS lead paragraph.</p>")
+
+    # LLM returns a long-enough summary -> used, flagged as llm_summary
+    async def fake_llm(*args, **kwargs):
+        return NewsSummarySchema(summary="A well formed AI generated summary sentence.")
+
+    monkeypatch.setattr(news_llm_engine, "extract_structured", fake_llm)
+    summary, is_llm = await crawler._build_summary("TechCrunch AI", entry, "Title", "Full article body text here.")
+    assert is_llm is True
+    assert "well formed AI generated" in summary
+
+    # LLM raises -> fall back to the cleaned RSS summary, not llm_summary
+    async def failing_llm(*args, **kwargs):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(news_llm_engine, "extract_structured", failing_llm)
+    summary, is_llm = await crawler._build_summary("TechCrunch AI", entry, "Title", "Full article body text here.")
+    assert is_llm is False
+    assert "RSS lead paragraph" in summary
+
+    # LLM returns a summary shorter than the 20-char floor -> RSS fallback wins
+    async def short_llm(*args, **kwargs):
+        return NewsSummarySchema(summary="tiny")
+
+    monkeypatch.setattr(news_llm_engine, "extract_structured", short_llm)
+    summary, is_llm = await crawler._build_summary("TechCrunch AI", entry, "Title", "Full article body text here.")
+    assert is_llm is False
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+async def test_news_resolve_entry_date_full_text_inference(monkeypatch):
+    crawler = NewsCrawler()
+    # Full-text relative recency expression: '3 hours ago' resolves to a fresh date
+    resolved = crawler._resolve_entry_date(
+        None, None, "", "Published 3 hours ago by the editorial team.",
+        "https://example.com/x", "https://example.com/x", "title",
+    )
+    assert resolved is not None
+    age = datetime.now(timezone.utc) - resolved
+    assert 2.5 * 3600 < age.total_seconds() < 3.5 * 3600
+
+    # HTML meta-date that fails the freshness gate counts as a source date -> strict
+    # rejection (None), never rescued by the dateless-novelty stamp.
+    stale_html = '<meta property="article:published_time" content="2026-08-01T10:00:00Z">'
+    assert crawler._resolve_entry_date(
+        None, None, stale_html, "", "https://example.com/y", "https://example.com/y", "title2",
+    ) is None
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+async def test_news_process_entry_early_rejects():
+    crawler = NewsCrawler()
+    # Missing title / missing link / HN-internal link all short-circuit before any fetch
+    assert await crawler._process_entry(_NS(title="", link="https://example.com/a"), "Feed") is None
+    assert await crawler._process_entry(_NS(title="T", link=""), "Feed") is None
+    assert await crawler._process_entry(_NS(title="T", link="https://news.ycombinator.com/item?id=1"), "Feed") is None
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+async def test_news_crawl_source_error_paths():
+    crawler = NewsCrawler(sources=[{"name": "Feed A", "feed_url": "https://a/feed"}])
+
+    # Source-level fetch failure -> [] plus a warning
+    async def fetch_feed_boom(url, **kwargs):
+        raise RuntimeError("feed down")
+
+    crawler.fetch_feed = fetch_feed_boom  # type: ignore[method-assign]
+    assert await crawler.crawl_source({"name": "Feed A", "feed_url": "https://a/feed"}) == []
+
+    # Entry-level processing failure -> isolated by gather(return_exceptions=True)
+    async def process_boom(entry, source_name):
+        raise ValueError("entry exploded")
+
+    crawler.fetch_feed = AsyncMock(return_value=[_NS(title="a")])
+    crawler._process_entry = process_boom  # type: ignore[method-assign]
+    assert await crawler.crawl_source({"name": "Feed A", "feed_url": "https://a/feed"}) == []
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+async def test_news_crawl_post_gather_dedup_and_telemetry_failure(monkeypatch, tmp_path, capsys):
+    # Two sources producing near-identical normalized titles: the post-gather pass
+    # removes the duplicate pair; telemetry persistence failures are swallowed.
+    crawler = NewsCrawler(sources=[{"name": "A", "feed_url": "https://a/feed"}, {"name": "B", "feed_url": "https://b/feed"}])
+
+    async def fake_crawl_source(src):
+        return [
+            NewsRecord(
+                source=SourceMetadata(name="A", url="https://a/1"),
+                content=NewsContent(
+                    title="OpenAI Ships Agent Tools",
+                    published_date="2026-09-04T10:00:00Z",
+                    summary=None,
+                    full_text="A sufficiently long article body that repeats the headline news multiple times.",
+                ),
+            ),
+            NewsRecord(
+                source=SourceMetadata(name="B", url="https://b/1"),
+                content=NewsContent(
+                    title="OpenAI Ships Agent Tools!",  # fuzzy duplicate of the first
+                    published_date="2026-09-04T10:30:00Z",
+                    summary=None,
+                    full_text="Another sufficiently long article body repeating the same headline news over and over.",
+                ),
+            ),
+        ]
+
+    crawler.crawl_source = fake_crawl_source  # type: ignore[method-assign]
+
+    def failing_dump(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("src.crawlers.news_crawler.json.dump", failing_dump)
+
+    # Act
+    records = await crawler.crawl()
+
+    # Assert - one record survives the fuzzy post-gather dedup; telemetry failure did not abort
+    assert len(records) == 1
+    assert records[0].source.url == "https://a/1"
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+@respx.mock
+async def test_news_hacker_news_article_full_text_paths():
+    # HN feed entries link out to external articles via their RSS description blob.
+    # Entry 1: article fetch succeeds -> full text from the linked article.
+    # Entry 2: article fetch fails -> title fallback, no HTML ever leaks into the summary.
+    hn_feed = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>HN AI</title>
+<item>
+<title>Frontier Model Breakthrough Announced</title>
+<link>https://news.example.org/items/1</link>
+<pubDate>Fri, 04 Sep 2026 10:00:00 GMT</pubDate>
+<description>&lt;p&gt;Article URL: &lt;a href="https://arxiv.org/abs/2406.0001"&gt;paper&lt;/a&gt;&lt;/p&gt;&lt;p&gt;Comments URL: &lt;a href="https://news.ycombinator.com/item?id=1"&gt;comments&lt;/a&gt;&lt;/p&gt;</description>
+</item>
+<item>
+<title>Another Frontier Model Milestone</title>
+<link>https://news.example.org/items/2</link>
+<pubDate>Fri, 04 Sep 2026 10:00:00 GMT</pubDate>
+<description>&lt;p&gt;Article URL: &lt;a href="https://arxiv.org/abs/2406.0002"&gt;paper&lt;/a&gt;&lt;/p&gt;</description>
+</item>
+</channel></rss>
+"""
+    crawler = NewsCrawler(sources=[{"name": "Hacker News AI", "feed_url": "https://hn.example/ai"}])
+    respx.get("https://hn.example/ai").mock(return_value=httpx.Response(200, text=hn_feed))
+    respx.get("https://arxiv.org/abs/2406.0001").mock(return_value=httpx.Response(200, text=ARTICLE_HTML))
+    respx.get("https://arxiv.org/abs/2406.0002").mock(return_value=httpx.Response(500))
+
+    # Act
+    records = await crawler.crawl()
+    await crawler.close()
+
+    # Assert - both survive; the first has real full text, the second falls back to its title
+    assert len(records) == 2
+    assert "frontier" in records[0].content.full_text.lower()
+    assert records[0].content.summary and "<" not in records[0].content.summary
+    assert records[1].content.full_text == "Another Frontier Model Milestone"
+    assert records[1].content.summary == "Another Frontier Model Milestone"

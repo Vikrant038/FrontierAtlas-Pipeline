@@ -5,14 +5,14 @@ module-level breaker state is reset after every test so a tripped host cannot
 leak into other tests.
 """
 
+import time
 from unittest.mock import AsyncMock
 
 import pytest
 
+import src.crawlers.anti_bot as anti_bot
 import src.crawlers.base as base
-from src.crawlers.base import (
-    BotBlockedError,
-    TargetedCrawler,
+from src.crawlers.anti_bot import (
     _BLOCK_THRESHOLD,
     _BLOCK_WINDOW_SECONDS,
     _breaker_is_open,
@@ -20,6 +20,7 @@ from src.crawlers.base import (
     _record_block,
     _record_escalation_success,
 )
+from src.crawlers.base import BotBlockedError, TargetedCrawler
 
 
 @pytest.fixture(autouse=True)
@@ -44,13 +45,13 @@ def test_breaker_expires_after_cooldown(monkeypatch):
     # Arrange
     host = "expire.example.com"
     clock = [1000.0]
-    monkeypatch.setattr(base.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     for _ in range(_BLOCK_THRESHOLD):
         _record_block(host)
     assert _breaker_is_open(host)
 
     # Act: advance the clock past the cooldown window
-    clock[0] += base._BLOCK_COOLDOWN_SECONDS + 1.0
+    clock[0] += anti_bot._BLOCK_COOLDOWN_SECONDS + 1.0
 
     # Assert
     assert not _breaker_is_open(host)
@@ -60,7 +61,7 @@ def test_blocks_age_out_of_window_before_tripping(monkeypatch):
     # Arrange
     host = "aging.example.com"
     clock = [1000.0]
-    monkeypatch.setattr(base.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     _record_block(host)
     _record_block(host)
     clock[0] += _BLOCK_WINDOW_SECONDS + 1.0
@@ -77,7 +78,7 @@ def test_escalation_success_resets_host_history(monkeypatch):
     # Arrange
     host = "transient.example.com"
     clock = [1000.0]
-    monkeypatch.setattr(base.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     _record_block(host)
     _record_block(host)
 

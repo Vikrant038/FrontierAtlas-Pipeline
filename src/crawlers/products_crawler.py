@@ -199,11 +199,17 @@ class ProductsCrawler(TargetedCrawler):
         recovered = self.recover_from_wal(model_cls=ProductRecord)
         if recovered:
             logger.info(f"Resumed {recovered} products from WAL; continuing toward {self.target_count}.")
-        for src_name, url in self._configured_sources():
+        sources = self._configured_sources()
+        # Fetch all source documents concurrently (independent downloads), then process each.
+        fetched = await asyncio.gather(*(self.fetch(url) for _, url in sources), return_exceptions=True)
+
+        for (src_name, url), content in zip(sources, fetched):
             if self.is_full:
                 break
+            if isinstance(content, Exception):
+                logger.warning(f"Error crawling products from {src_name}: {repr(content)}")
+                continue
             try:
-                content = await self.fetch(url)
                 if "awesome-ai-agents" in url:
                     items = self._parse_awesome_agents(content)
                 else:

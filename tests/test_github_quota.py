@@ -9,6 +9,7 @@ import httpx
 import pytest
 import respx
 
+from src.config import settings
 from src.crawlers.papers_crawler import (
     GITHUB_MIN_REQUEST_INTERVAL_SECONDS,
     ResearchPapersCrawler,
@@ -31,6 +32,38 @@ async def test_github_pacing_enforces_minimum_interval():
     # Assert - first call is unpaced, second waits at least the minimum interval
     assert first_slot_end - first_slot_start < GITHUB_MIN_REQUEST_INTERVAL_SECONDS
     assert second_slot_end - second_slot_start >= GITHUB_MIN_REQUEST_INTERVAL_SECONDS * 0.95
+
+
+@pytest.mark.asyncio
+async def test_pace_github_different_tokens_do_not_serialize(monkeypatch):
+    # Arrange: shorten the pacing interval so the test runs fast
+    monkeypatch.setattr(settings, "github_interval_seconds", 0.2)
+    crawler = ResearchPapersCrawler(target_count=1)
+
+    # Act: first use of two different pooled tokens fires both immediately
+    start = asyncio.get_running_loop().time()
+    await asyncio.gather(crawler._pace_github("tok-a"), crawler._pace_github("tok-b"))
+    elapsed = asyncio.get_running_loop().time() - start
+    await crawler.close()
+
+    # Assert: independent per-token slots, no shared wait
+    assert elapsed < 0.05
+
+
+@pytest.mark.asyncio
+async def test_pace_github_same_token_chains_at_interval(monkeypatch):
+    # Arrange
+    monkeypatch.setattr(settings, "github_interval_seconds", 0.2)
+    crawler = ResearchPapersCrawler(target_count=1)
+
+    # Act: concurrent lookups with the same token chain at the pacing interval
+    start = asyncio.get_running_loop().time()
+    await asyncio.gather(crawler._pace_github("tok-a"), crawler._pace_github("tok-a"))
+    elapsed = asyncio.get_running_loop().time() - start
+    await crawler.close()
+
+    # Assert: the second same-token call waited for the first's slot to clear
+    assert elapsed >= 0.19
 
 
 @pytest.mark.asyncio

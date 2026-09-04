@@ -29,7 +29,7 @@ from tenacity import (
 
 from src.config import settings
 from src.llm.chunker import chunk_to_budget
-from src.llm.rate_limiter import rate_limiter
+from src.llm.rate_limiter import RateLimitExceededError, rate_limiter
 from src.llm.rules import REMOTE_SIGNALS, classify_pricing_by_keywords, classify_role_family
 from src.utils.date_normalizer import parse_retry_after
 from src.utils.logger import logger
@@ -128,17 +128,35 @@ class MultiTierLLMEngine:
 
     @staticmethod
     def _pick_key(keys: List[str], salt: str) -> Optional[str]:
-        """Round-robin-ish key selection from a pool, stable per prompt (spreads load across keys)."""
+        """Stable-per-prompt key selection from a pool (spreads load across keys)."""
         if not keys:
             return None
         if len(keys) == 1:
             return keys[0]
         return keys[hash(salt) % len(keys)]
 
+    async def _acquire_tier_slot(self, provider_id: str, keys: List[str], salt: str) -> Optional[str]:
+        """Acquire a rate-limit slot for a tier. With a key pool, try each key's own
+        window (first unsaturated wins) so N keys provide N x the provider RPM;
+        returns the chosen key, or None when no keys are configured (provider-level
+        window). Raises when every key's window is saturated -> tier failover."""
+        if not keys:
+            await rate_limiter.acquire(provider_id, max_wait=0.0)
+            return None
+        start = hash(salt) % len(keys)
+        for offset in range(len(keys)):
+            key = keys[(start + offset) % len(keys)]
+            try:
+                await rate_limiter.acquire(provider_id, max_wait=0.0, key=key)
+                return key
+            except RateLimitExceededError:
+                continue
+        raise RateLimitExceededError(f"All {provider_id} keys' rate windows saturated.")
+
     @_LLM_RETRY
-    async def _call_gemini(self, prompt: str, schema_json: str) -> str:
+    async def _call_gemini(self, prompt: str, schema_json: str, api_key: Optional[str] = None) -> str:
         """Tier 1: Google Gemini Flash using google-genai AsyncChat (AFC-recommended path)."""
-        api_key = self._pick_key(settings.gemini_api_key_list, prompt)
+        api_key = api_key or self._pick_key(settings.gemini_api_key_list, prompt)
         if not api_key:
             raise LLMTransientError("Gemini API key is not configured.")
         if self._gemini_exhausted_until > time.monotonic():
@@ -248,6 +266,23 @@ class MultiTierLLMEngine:
         return data
 
 
+    def _tier_descriptors(self, full_prompt: str, schema_json: str) -> List[Any]:
+        """Build the (name, provider_id, key_list, call_fn) tier table. Each call_fn
+        takes the rate-limiter-chosen key for its provider pool."""
+        return [
+            ("Tier 1 (Gemini)", "gemini", settings.gemini_api_key_list,
+             lambda k: self._call_gemini(full_prompt, schema_json, api_key=k)),
+            ("Tier 2 (Groq Secondary)", "groq", settings.groq_api_key_list,
+             lambda k: self._call_openai_compat(
+                 k, settings.groq_base_url, settings.groq_model, full_prompt, schema_json
+             )),
+            ("Tier 3 (Custom Gateway)", "custom", settings.tier3_api_key_list,
+             lambda k: self._call_openai_compat(
+                 k, settings.effective_tier3_base_url, settings.effective_tier3_model,
+                 full_prompt, schema_json
+             )),
+        ]
+
     async def extract_structured(
         self,
         raw_text: str,
@@ -264,28 +299,10 @@ class MultiTierLLMEngine:
             schema_json = json.dumps(schema_cls.model_json_schema(), indent=2)
             full_prompt = f"{instruction}\n\nCONTENT:\n{budgeted_text}"
 
-            tiers = [
-                ("Tier 1 (Gemini)", "gemini", lambda: self._call_gemini(full_prompt, schema_json)),
-                ("Tier 2 (Groq Secondary)", "groq", lambda: self._call_openai_compat(
-                    self._pick_key(settings.groq_api_key_list, full_prompt),
-                    settings.groq_base_url,
-                    settings.groq_model,
-                    full_prompt,
-                    schema_json,
-                )),
-                ("Tier 3 (Custom Gateway)", "custom", lambda: self._call_openai_compat(
-                    self._pick_key(settings.tier3_api_key_list, full_prompt),
-                    settings.effective_tier3_base_url,
-                    settings.effective_tier3_model,
-                    full_prompt,
-                    schema_json,
-                )),
-            ]
-
-            for provider_name, provider_id, call_fn in tiers:
+            for provider_name, provider_id, keys, call_fn in self._tier_descriptors(full_prompt, schema_json):
                 try:
-                    await rate_limiter.acquire(provider_id, max_wait=0.0)
-                    res_text = await asyncio.wait_for(call_fn(), timeout=settings.llm_extract_timeout_seconds)
+                    chosen_key = await self._acquire_tier_slot(provider_id, keys, full_prompt)
+                    res_text = await asyncio.wait_for(call_fn(chosen_key), timeout=settings.llm_extract_timeout_seconds)
                     cleaned_json = _clean_json_markdown(res_text)
                     parsed = json.loads(cleaned_json)
                     result = schema_cls.model_validate(parsed)

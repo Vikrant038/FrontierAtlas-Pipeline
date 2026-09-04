@@ -4,6 +4,21 @@
 > **Target Scale**: 500,000+ Distributed Crawled Records  
 > **Enforced Guardrails**: Pillars 0–7 & Modules 1–6 (`GUARDRAILS.md`, `CODING_STANDARDS.md`)
 
+> **Implemented status vs. code (verified Sep 2026)** — this document is the target
+> architecture; not every tier below exists in `src/` yet:
+> - **Tier A (`curl-cffi`)**: ✅ implemented (`fetch_tls`, `src/crawlers/base.py`), with
+>   HTTP-403 → TLS → Camoufox escalation, per-host circuit breaker + challenge-page
+>   detection (`src/crawlers/anti_bot.py`), and time-reset quota backoffs. Note: API
+>   endpoints run with `allow_tls_fallback=False` — no browser storm on GitHub/API 403s.
+> - **Tier B (residential proxy pools)**: ❌ not implemented — deferred (needs a funded
+>   provider; see the deferred list in `ARCHITECTURE_REVIEW.md`).
+> - **Tier C (managed headless grid)**: ◐ partial — local `camoufox` fallback exists
+>   (`_escalate_camoufox`, `base.py`), but it is an exception-path demo/fallback node,
+>   not a pooled grid; never routed for bulk feeds.
+> - **Tier D (external challenge solvers)**: ❌ not implemented — no CapSolver/FlareSolverr
+>   integration. Observed residuals (Economist-class paywall 403s) are logged as honest
+>   gaps instead of being forced.
+
 ---
 
 ## 1. Executive Summary
