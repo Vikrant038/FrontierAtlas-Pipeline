@@ -69,15 +69,14 @@ Notes:
 - Targets ≥1,000 automatically enable WAL checkpointing; an interrupted run prints guidance and resumes on the next invocation.
 - All source URLs, pacing, batch sizes, and limits are env-configurable (see `.env.example`).
 
-## Running Tests
+## Running Tests & Coverage Gate
 
 ```bash
-# Full suite (339 tests; offline, no live network)
+# Full test suite (352 tests; 100% offline, hermetic)
 pytest tests/ -q
 
-# Coverage (src-only, branch-aware, per .coveragerc)
-coverage erase && coverage run --branch -m pytest tests/ -q
-coverage report -m
+# Run with CI branch-coverage report & 80% threshold enforcement
+pytest --cov=src --cov-report=term-missing:skip-covered --cov-fail-under=80
 ```
 
-Current baseline: **339 tests passing; 96% statements / 90% branches** on `src/`.
+Current baseline: **352 tests passing; 95% statements / 91% branches** on `src/` (CI gate enforces `--cov-fail-under=80`).

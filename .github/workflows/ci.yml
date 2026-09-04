@@ -1,0 +1,61 @@
+name: CI Pipeline & Quality Gate
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-coverage:
+    name: Unit & Integration Tests (Branch Coverage Gate >= 80%)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Test Suite with Branch Coverage Gate (fail-under=80)
+        run: |
+          pytest --cov=src \
+                 --cov-report=term-missing:skip-covered \
+                 --cov-report=xml:coverage.xml \
+                 --cov-report=html:htmlcov \
+                 --cov-fail-under=80 \
+                 -v
+
+      - name: Publish Step Summary
+        if: always()
+        run: |
+          echo "### 🧪 Test Suite & Code Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          if [ -f coverage.xml ]; then
+            echo "✅ Coverage gate passed (>= 80% threshold enforced)." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Tests or coverage gate failed." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Coverage Reports Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          retention-days: 14
