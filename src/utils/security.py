@@ -53,4 +53,4 @@ def validate_url_safe(url: str, resolve_dns: bool = True) -> str:
         except socket.gaierror as exc:
             raise SSRFValidationError(f"Failed to resolve DNS for hostname '{hostname}': {exc}") from exc
 
-    return url
+    return parsed.geturl()

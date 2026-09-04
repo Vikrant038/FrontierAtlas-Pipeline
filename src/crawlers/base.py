@@ -5,6 +5,7 @@ SSRF URL sanitization, and curl-cffi TLS impersonation fallback.
 """
 
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from datetime import datetime
@@ -38,6 +39,11 @@ DEFAULT_HEADERS = {
 
 class TransientNetworkError(Exception):
     """Raised on 429, 500, 502, 503, 504, or network disconnects."""
+    pass
+
+
+class BotBlockedError(Exception):
+    """Raised on HTTP 403: target rejected the client fingerprint (anti-bot wall)."""
     pass
 
 
@@ -112,7 +118,7 @@ class AsyncBaseCrawler(ABC):
         timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Core HTTP request with SSRF validation, semaphore bounds, and retry backoff."""
-        safe_url = validate_url_safe(url)
+        safe_url = await asyncio.to_thread(validate_url_safe, url)
         client = await self.get_client()
         req_headers = {**self.headers, **(headers or {})}
         req_timeout = timeout if timeout is not None else self.timeout
@@ -120,6 +126,8 @@ class AsyncBaseCrawler(ABC):
         async with self.semaphore:
             try:
                 resp = await client.get(safe_url, params=params, headers=req_headers, timeout=req_timeout)
+                if resp.status_code == 403:
+                    raise BotBlockedError(f"HTTP 403 for {safe_url}")
                 if resp.status_code in (429, 500, 502, 503, 504):
                     if resp.status_code == 429:
                         await _handle_retry_after(resp.headers, safe_url)
@@ -136,8 +144,12 @@ class AsyncBaseCrawler(ABC):
         headers: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
     ) -> str:
-        """Fetch URL content as text string."""
-        return (await self._request(url, params=params, headers=headers, timeout=timeout)).text
+        """Fetch URL content as text string; escalates to TLS impersonation on 403 anti-bot blocks."""
+        try:
+            return (await self._request(url, params=params, headers=headers, timeout=timeout)).text
+        except BotBlockedError:
+            logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
+            return await self.fetch_tls(url, params=params)
 
     async def fetch_json(
         self,
@@ -145,26 +157,37 @@ class AsyncBaseCrawler(ABC):
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
+        allow_tls_fallback: bool = True,
     ) -> Any:
-        """Fetch URL and return parsed JSON."""
-        return (await self._request(url, params=params, headers=headers, timeout=timeout)).json()
+        """Fetch URL and return parsed JSON; escalates to TLS impersonation on 403 anti-bot blocks."""
+        try:
+            return (await self._request(url, params=params, headers=headers, timeout=timeout)).json()
+        except BotBlockedError:
+            if not allow_tls_fallback:
+                raise
+            logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
+            return json.loads(await self.fetch_tls(url, params=params))
 
     @_CRAWLER_RETRY
-    async def fetch_tls(self, url: str) -> str:
+    async def fetch_tls(self, url: str, params: Optional[Dict[str, Any]] = None) -> str:
         """Fetch using curl-cffi with Chrome124 TLS fingerprint impersonation."""
         safe_url = validate_url_safe(url)
         async with self.semaphore:
             try:
                 async with CurlAsyncSession(impersonate="chrome124") as curl_session:
-                    resp = await curl_session.get(safe_url, headers=self.headers, timeout=int(self.timeout))
+                    resp = await curl_session.get(
+                        safe_url, params=params, headers=self.headers, timeout=int(self.timeout)
+                    )
+                    if resp.status_code == 403:
+                        raise BotBlockedError(f"curl-cffi HTTP 403 for {safe_url}")
                     if resp.status_code in (429, 500, 502, 503, 504):
                         if resp.status_code == 429:
                             await _handle_retry_after(resp.headers, safe_url)
                         raise TransientNetworkError(f"curl-cffi HTTP {resp.status_code}")
                     return resp.text
+            except (BotBlockedError, TransientNetworkError):
+                raise
             except Exception as exc:
-                if isinstance(exc, TransientNetworkError):
-                    raise
                 raise TransientNetworkError(str(exc)) from exc
 
     async def fetch_feed(self, url: str, params: Optional[Dict[str, Any]] = None) -> List[Any]:

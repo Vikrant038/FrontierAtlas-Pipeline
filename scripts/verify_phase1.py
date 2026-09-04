@@ -1,12 +1,17 @@
 """
 Phase I Verification Script.
-Audits exports/phase1_test.xlsx against ENTITY_SPECS:
+Audits a Phase I workbook against ENTITY_SPECS:
 - Verifies row counts for Startups, Products, Research_Papers (>= 100).
 - Verifies Entity Resolution audit log distribution (mix of NORMALIZATION_EXACT / ALIAS_MATCH / NEW_ENTITY).
 - Spot-checks random records for valid URLs, ISO-8601 UTC dates, and plausible GitHub stars.
 - Reports Research Paper GitHub URL hit-rate.
+
+Usage:
+    python scripts/verify_phase1.py [path/to/workbook.xlsx]
+    (defaults to exports/phase1_test.xlsx — the CLI `--phase 1` output target)
 """
 
+import sys
 from collections import Counter
 from pathlib import Path
 import random
@@ -14,7 +19,8 @@ from typing import Any, Dict, List
 import openpyxl
 from dateutil import parser as dateutil_parser
 
-EXCEL_PATH = Path("exports/phase1_test.xlsx")
+DEFAULT_EXCEL_PATH = Path("exports/phase1_test.xlsx")
+EXCEL_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_EXCEL_PATH
 
 
 def get_sheet_records(ws) -> List[Dict[str, Any]]:

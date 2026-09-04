@@ -56,7 +56,7 @@ class KnowledgeGraphBuilder:
 
         # 3. Add Research Papers & GitHub Repos: Paper -> IMPLEMENTS -> Repo
         for r in (papers or []):
-            paper_node = f"Paper:{r.content.title[:40]}"
+            paper_node = f"Paper:{r.content.paper_url}"
             self.graph.add_node(paper_node, label=r.content.title, node_type="RESEARCH_PAPER", paper_url=r.content.paper_url)
             if r.content.github_url:
                 repo_node = f"Repo:{r.content.github_url}"

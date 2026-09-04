@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from rapidfuzz import fuzz, process
 
 from src.schemas.entities import EntityResolutionLog, MatchMethodEnum
+from src.utils.logger import logger
 from src.resolution.seed_data import (
     CANONICAL_AI_ENTITIES,
     CORPORATE_SUFFIXES,
@@ -61,25 +62,35 @@ class EntityResolver:
 
     def _load_cache(self) -> None:
         """Load previously learned entities and domain mappings from disk if cache exists."""
-        if os.path.exists(self.cache_path):
-            try:
-                with open(self.cache_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for entity in data.get("entities", []):
-                        self.canonical_entities.add(entity)
-                        self.normalized_map[normalize_string_tier1(entity)] = entity
-                    self.domain_map.update(data.get("domains", {}))
-            except Exception:
-                pass  # Fall back to base seed state on read error
+        if not os.path.exists(self.cache_path):
+            return
+        try:
+            with open(self.cache_path, "r", encoding="utf-8") as cache_file:
+                cached_registry = json.load(cache_file)
+        except (json.JSONDecodeError, OSError) as cache_exc:
+            # Corrupt or unreadable cache: fall back to base seed state, never crash startup.
+            logger.warning(f"Canonical registry cache unreadable ({cache_exc}); using seed entities only.")
+            return
+        for entity in cached_registry.get("entities", []):
+            self.canonical_entities.add(entity)
+            self.normalized_map[normalize_string_tier1(entity)] = entity
+        self.domain_map.update(cached_registry.get("domains", {}))
 
     def save_cache(self) -> None:
         """Persist dynamically learned entities and domain grounding registry to disk."""
-        os.makedirs(os.path.dirname(os.path.abspath(self.cache_path)), exist_ok=True)
-        with open(self.cache_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "entities": sorted(list(self.canonical_entities)),
-                "domains": self.domain_map
-            }, f, indent=2)
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.cache_path)), exist_ok=True)
+            with open(self.cache_path, "w", encoding="utf-8") as cache_file:
+                json.dump({
+                    "entities": sorted(list(self.canonical_entities)),
+                    "domains": self.domain_map
+                }, cache_file, indent=2)
+            logger.info(
+                f"Canonical registry persisted: {len(self.canonical_entities)} entities, "
+                f"{len(self.domain_map)} grounded domains -> {self.cache_path}"
+            )
+        except OSError as cache_exc:
+            logger.error(f"Failed to persist canonical registry to {self.cache_path}: {cache_exc}")
 
     def resolve(
         self,
