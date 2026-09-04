@@ -24,7 +24,6 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import settings
-from src.utils.logger import logger
 
 
 async def test_gemini(api_key: Optional[str] = None) -> bool:
@@ -42,13 +41,15 @@ async def test_gemini(api_key: Optional[str] = None) -> bool:
         from google.genai import types
 
         client = genai.Client(api_key=key)
-        response = await client.aio.models.generate_content(
+        chat = client.aio.chats.create(
             model=settings.gemini_model,
-            contents='Return a JSON object with keys "status" ("ok") and "message" ("Gemini online").',
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
             ),
+        )
+        response = await chat.send_message(
+            'Return a JSON object with keys "status" ("ok") and "message" ("Gemini online").'
         )
         elapsed = time.monotonic() - t0
         print(f"✅ {settings.gemini_model} responded in {elapsed:.2f}s:")

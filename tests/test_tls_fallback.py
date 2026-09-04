@@ -26,7 +26,7 @@ async def test_fetch_escalates_to_tls_on_403_block():
     crawler = DummyCrawler()
     fallback_called = False
 
-    async def fake_fetch_tls(url, params=None):
+    async def fake_fetch_tls(url, params=None, timeout=None):
         nonlocal fallback_called
         fallback_called = True
         assert url == test_url
@@ -52,7 +52,7 @@ async def test_fetch_json_escalates_to_tls_on_403_block():
     respx.get(test_url).mock(return_value=httpx.Response(403))
     crawler = DummyCrawler()
 
-    async def fake_fetch_tls(url, params=None):
+    async def fake_fetch_tls(url, params=None, timeout=None):
         assert url == test_url
         return json.dumps(expected_payload)
 
@@ -75,7 +75,7 @@ async def test_fetch_does_not_escalate_on_other_status_codes():
     crawler = DummyCrawler()
     fallback_called = False
 
-    async def fake_fetch_tls(url, params=None):
+    async def fake_fetch_tls(url, params=None, timeout=None):
         nonlocal fallback_called
         fallback_called = True
         return "should not happen"

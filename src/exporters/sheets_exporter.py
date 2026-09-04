@@ -78,8 +78,8 @@ class GoogleSheetsExporter:
                 with open(self.service_account_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     return data.get("client_email", "your-service-account@...iam.gserviceaccount.com")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"Could not read service account email from {self.service_account_path}: {exc}")
         return "your-service-account@...iam.gserviceaccount.com"
 
     def get_or_create_spreadsheet(
@@ -87,17 +87,15 @@ class GoogleSheetsExporter:
         client: gspread.Client,
         title: str = DEFAULT_SPREADSHEET_TITLE,
     ) -> gspread.Spreadsheet:
-        """Open existing spreadsheet by ID if configured, or create a new one."""
+        """
+        Open the spreadsheet when an explicit GOOGLE_SHEETS_SPREADSHEET_ID is configured,
+        or create a fresh one when unset. Strict mode with explicit ID: any open failure
+        raises (no silent stray-spreadsheet creation masking a misconfigured ID).
+        """
         if self.spreadsheet_id:
-            try:
-                spreadsheet = client.open_by_key(self.spreadsheet_id)
-                logger.info(f"Opened existing Google Spreadsheet by ID: {self.spreadsheet_id}")
-                return spreadsheet
-            except Exception as exc:
-                logger.warning(
-                    f"Could not open spreadsheet ID {self.spreadsheet_id} ({exc}). "
-                    f"Falling back to creating a new spreadsheet named '{title}'."
-                )
+            spreadsheet = client.open_by_key(self.spreadsheet_id)
+            logger.info(f"Opened existing Google Spreadsheet by ID: {self.spreadsheet_id}")
+            return spreadsheet
         try:
             spreadsheet = client.create(title)
             logger.info(f"Created new Google Spreadsheet: '{title}' (ID: {spreadsheet.id})")
@@ -170,8 +168,9 @@ class GoogleSheetsExporter:
                 default_sheet = spreadsheet.worksheet("Sheet1")
                 spreadsheet.del_worksheet(default_sheet)
                 logger.debug("Removed default 'Sheet1'.")
-        except Exception:
-            pass
+        except Exception as exc:
+            # Best-effort cleanup: 'Sheet1' may not exist (pre-created spreadsheet).
+            logger.debug(f"Default sheet cleanup skipped: {exc}")
 
     def _share_with_evaluator(self, spreadsheet: gspread.Spreadsheet) -> None:
         """Programmatically share spreadsheet with evaluator email or print reminder."""
@@ -180,10 +179,10 @@ class GoogleSheetsExporter:
                 spreadsheet.share(
                     self.evaluator_email,
                     perm_type="user",
-                    role="viewer",
+                    role="reader",
                     notify=False,
                 )
-                logger.info(f"Shared spreadsheet with evaluator '{self.evaluator_email}' as viewer.")
+                logger.info(f"Shared spreadsheet with evaluator '{self.evaluator_email}' as reader.")
             except Exception as exc:
                 logger.warning(f"Could not automatically share spreadsheet with {self.evaluator_email}: {exc}")
         else:

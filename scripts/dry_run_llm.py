@@ -9,7 +9,6 @@ Demonstrates active fallback chain: Tier 1 failover to Tier 2, and all API failo
 """
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock

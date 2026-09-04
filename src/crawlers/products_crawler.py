@@ -3,8 +3,9 @@ Products crawler for acquiring 1,000+ AI products from clean curated markdown di
 Guarantees 0 list anchors, authentic product destination URLs, and grounded pricing classification.
 """
 
+import asyncio
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from src.crawlers.base import TargetedCrawler
 from src.llm.fallback_chain import llm_engine
@@ -31,6 +32,11 @@ KNOWN_PRICING: Dict[str, PricingModelEnum] = {
 }
 
 
+def _known_pricing(name: str) -> Optional[PricingModelEnum]:
+    """Return the KNOWN_PRICING override for a product name, or None."""
+    return KNOWN_PRICING.get((name or "").strip().lower())
+
+
 class ProductsCrawler(TargetedCrawler):
     """Crawler for acquiring 1,000+ unique AI products from clean curated markdown directories."""
 
@@ -47,16 +53,14 @@ class ProductsCrawler(TargetedCrawler):
     @staticmethod
     def classify_pricing(name: str, url: str, desc: str) -> PricingModelEnum:
         """Classify pricing model using known-product overrides, then shared keyword tiers."""
-        n = (name or "").lower().strip()
-        if n in KNOWN_PRICING:
-            return KNOWN_PRICING[n]
-        return classify_pricing_by_keywords(name, url, desc)
+        known = _known_pricing(name)
+        return known if known is not None else classify_pricing_by_keywords(name, url, desc)
 
     async def classify_pricing_async(self, name: str, url: str, desc: str) -> PricingModelEnum:
-        """Classify pricing model using LLM fallback when description is available (>=15 chars), falling back to keyword rules."""
-        n = (name or "").lower().strip()
-        if n in KNOWN_PRICING:
-            return KNOWN_PRICING[n]
+        """Classify pricing via LLM when a description exists, else known-override/keyword rules."""
+        known = _known_pricing(name)
+        if known is not None:
+            return known
 
         desc_clean = (desc or "").strip()
         if len(desc_clean) >= 15:
@@ -75,7 +79,7 @@ class ProductsCrawler(TargetedCrawler):
         return self.classify_pricing(name, url, desc)
 
     @staticmethod
-    def _extract_maker(name: str, desc: str, url: str) -> str:
+    def _get_raw_maker(name: str, desc: str, url: str) -> str:
         m = re.search(r"\b(?:by|from)\s+([A-Z][A-Za-z0-9\s&.-]{1,30}?)(?:\s+(?:is|has|was|provides|\.|\,)|$)", desc)
         raw_maker = m.group(1).strip() if m else name
         # Sentence-like fallbacks (essay titles, citations) are not companies:
@@ -83,7 +87,18 @@ class ProductsCrawler(TargetedCrawler):
         if len(raw_maker.split()) > 5 or raw_maker.endswith((".", "!", "?")):
             domain = extract_domain(url)
             raw_maker = domain.split(".")[0].capitalize() if domain else name
+        return raw_maker
+
+    @classmethod
+    def _extract_maker(cls, name: str, desc: str, url: str) -> str:
+        raw_maker = cls._get_raw_maker(name, desc, url)
         return entity_resolver.resolve(raw_name=raw_maker, source_url=url, entity_type="STARTUP")[0]
+
+    @classmethod
+    async def _extract_maker_async(cls, name: str, desc: str, url: str) -> str:
+        raw_maker = cls._get_raw_maker(name, desc, url)
+        canonical, _ = await entity_resolver.resolve_async(raw_name=raw_maker, source_url=url, entity_type="STARTUP")
+        return canonical
 
     def _parse_awesome_agents(self, text: str) -> List[Tuple[str, str, str]]:
         """Parse structured '## [Product Name](URL)' sections from Awesome AI Agents."""
@@ -120,6 +135,27 @@ class ProductsCrawler(TargetedCrawler):
             items.append((name, url, desc))
         return items
 
+    async def _process_item(
+        self, src_name: str, name: str, item_url: str, desc: str, sem: asyncio.Semaphore
+    ) -> Optional[ProductRecord]:
+        """Classify pricing and construct ProductRecord within concurrency limit."""
+        async with sem:
+            try:
+                pricing = await self.classify_pricing_async(name, item_url, desc)
+                maker = await self._extract_maker_async(name, desc, item_url)
+                return ProductRecord(
+                    source=SourceMetadata(name=src_name, url=item_url),
+                    content=ProductContent(
+                        startupName=maker,
+                        productName=name,
+                        productUrl=item_url,
+                        pricingModel=pricing,
+                    ),
+                )
+            except Exception as exc:
+                logger.debug(f"Failed to process product '{name}': {exc}")
+                return None
+
     async def crawl(self) -> List[ProductRecord]:
         """Collect 1,000+ unique AI products from clean curated markdown directories."""
         logger.info(f"Starting ProductsCrawler (Target: {self.target_count})...")
@@ -133,23 +169,22 @@ class ProductsCrawler(TargetedCrawler):
                 else:
                     items = self._parse_markdown_list(content)
 
+                candidates = []
                 for name, item_url, desc in items:
-                    if not name or "#" in item_url:
+                    if not name or "#" in item_url or self.is_full:
                         continue
-                    if self.is_full:
+                    candidates.append((name, item_url, desc))
+                    if len(candidates) >= self.remaining:
                         break
-                    pricing = await self.classify_pricing_async(name, item_url, desc)
-                    record = ProductRecord(
-                        source=SourceMetadata(name=src_name, url=item_url),
-                        content=ProductContent(
-                            startupName=self._extract_maker(name, desc, item_url),
-                            productName=name,
-                            productUrl=item_url,
-                            pricingModel=pricing,
-                        ),
-                    )
-                    if self.add(name, record):
-                        break
+
+                sem = asyncio.Semaphore(15)
+                tasks = [self._process_item(src_name, n, u, d, sem) for n, u, d in candidates]
+                records = await asyncio.gather(*tasks)
+                for rec in records:
+                    if rec:
+                        # add() registers the dedup key only on success, so failed
+                        # extractions are not consumed and may be retried later.
+                        self.add(rec.content.productName, rec)
             except Exception as exc:
                 logger.warning(f"Error crawling products from {src_name}: {repr(exc)}")
 

@@ -60,11 +60,9 @@ class Settings(BaseSettings):
     max_concurrent_requests: int = 15
     default_request_timeout_seconds: float = 30.0
     token_budget_per_prompt: int = 3500
-    arxiv_rate_limit: float = 2.5
 
     # Telemetry & Output
     log_level: str = "INFO"
-    export_directory: str = "exports"
 
     # Google Sheets Deliverable Export (gspread)
     google_service_account_path: Optional[str] = None

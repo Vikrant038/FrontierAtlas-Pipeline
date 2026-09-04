@@ -67,6 +67,7 @@ def test_sheets_exporter_creates_6_tabs_and_batches(mocker, tmp_path):
 
     exporter = GoogleSheetsExporter(
         service_account_path=str(fake_key),
+        spreadsheet_id="",
         evaluator_email="test@example.com",
     )
 
@@ -86,7 +87,7 @@ def test_sheets_exporter_creates_6_tabs_and_batches(mocker, tmp_path):
     mock_spreadsheet.share.assert_called_once_with(
         "test@example.com",
         perm_type="user",
-        role="viewer",
+        role="reader",
         notify=False,
     )
 
@@ -187,25 +188,20 @@ def test_open_existing_spreadsheet_by_id(mocker, tmp_path):
     assert spreadsheet == mock_spreadsheet
 
 
-def test_open_existing_spreadsheet_falls_back_to_create_on_error(mocker, tmp_path):
-    # Arrange
+def test_explicit_spreadsheet_id_failure_raises_no_stray_creation(mocker, tmp_path):
+    # Arrange - strict mode: a configured ID that fails to open must raise, never
+    # silently create a stray spreadsheet that masks the misconfiguration.
     fake_key = tmp_path / "fake.json"
     fake_key.write_text('{"type": "service_account"}')
 
     mock_client = MagicMock()
     mock_client.open_by_key.side_effect = Exception("Not found")
-    mock_spreadsheet = MagicMock()
-    mock_client.create.return_value = mock_spreadsheet
-
     exporter = GoogleSheetsExporter(
         service_account_path=str(fake_key),
         spreadsheet_id="bad-or-deleted-id",
     )
 
-    # Act
-    spreadsheet = exporter.get_or_create_spreadsheet(mock_client, title="Fallback Title")
-
-    # Assert
-    mock_client.open_by_key.assert_called_once_with("bad-or-deleted-id")
-    mock_client.create.assert_called_once_with("Fallback Title")
-    assert spreadsheet == mock_spreadsheet
+    # Act & Assert
+    with pytest.raises(Exception, match="Not found"):
+        exporter.get_or_create_spreadsheet(mock_client, title="Fallback Title")
+    mock_client.create.assert_not_called()

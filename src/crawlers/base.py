@@ -7,6 +7,7 @@ SSRF URL sanitization, and curl-cffi TLS impersonation fallback.
 import asyncio
 import json
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 import feedparser
@@ -153,6 +154,20 @@ class AsyncBaseCrawler(ABC):
                     raise net_err
                 raise TransientNetworkError(repr(net_err)) from net_err
 
+    async def _escalate_tls(
+        self,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+        as_json: bool = False,
+    ) -> Any:
+        """Escalate an anti-bot 403 to curl-cffi TLS impersonation, returning text or parsed JSON."""
+        AsyncBaseCrawler.escalation_attempts += 1
+        logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
+        res_raw = await self.fetch_tls(url, params=params, timeout=timeout)
+        AsyncBaseCrawler.escalation_successes += 1
+        return json.loads(res_raw) if as_json else res_raw
+
     async def fetch(
         self,
         url: str,
@@ -168,14 +183,7 @@ class AsyncBaseCrawler(ABC):
         except BotBlockedError:
             if not allow_tls_fallback:
                 raise
-            AsyncBaseCrawler.escalation_attempts += 1
-            logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
-            if timeout is not None:
-                res_text = await self.fetch_tls(url, params=params, timeout=timeout)
-            else:
-                res_text = await self.fetch_tls(url, params=params)
-            AsyncBaseCrawler.escalation_successes += 1
-            return res_text
+            return await self._escalate_tls(url, params=params, timeout=timeout)
 
     async def fetch_json(
         self,
@@ -191,15 +199,7 @@ class AsyncBaseCrawler(ABC):
         except BotBlockedError:
             if not allow_tls_fallback:
                 raise
-            AsyncBaseCrawler.escalation_attempts += 1
-            logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
-            if timeout is not None:
-                res_raw = await self.fetch_tls(url, params=params, timeout=timeout)
-            else:
-                res_raw = await self.fetch_tls(url, params=params)
-            AsyncBaseCrawler.escalation_successes += 1
-            return json.loads(res_raw)
-
+            return await self._escalate_tls(url, params=params, timeout=timeout, as_json=True)
 
     @_CRAWLER_RETRY
     async def fetch_tls(
@@ -246,14 +246,55 @@ class AsyncBaseCrawler(ABC):
 
 
 class TargetedCrawler(AsyncBaseCrawler):
-    """Base class for crawlers collecting up to a target quota with deduplication."""
+    """Base class for crawlers collecting up to a target quota with deduplication and append-only WAL."""
 
-    def __init__(self, target_count: int = 1000, **kwargs):
+    def __init__(
+        self,
+        target_count: int = 1000,
+        wal_enabled: bool = False,
+        wal_path: Optional[str] = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.target_count = target_count
         self.github_token = settings.github_token
         self.seen_keys: set = set()
         self.collected: List[Any] = []
+        self.wal_enabled: bool = wal_enabled or (wal_path is not None)
+        self.wal_path: Optional[str] = wal_path or (
+            str(Path("exports/wal") / f"{self.__class__.__name__.lower()}_wal.jsonl")
+            if self.wal_enabled
+            else None
+        )
+        self._wal_file = None
+
+    def _get_wal_file(self):
+        """Lazily initialize and open append-only WAL file."""
+        if self._wal_file is None and self.wal_enabled and self.wal_path:
+            p = Path(self.wal_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            self._wal_file = open(p, "a", encoding="utf-8")
+        return self._wal_file
+
+    def close_wal(self) -> None:
+        """Flush and close WAL file handle."""
+        if self._wal_file and not self._wal_file.closed:
+            try:
+                self._wal_file.flush()
+                self._wal_file.close()
+            except Exception as exc:
+                logger.debug(f"Error closing WAL file: {exc}")
+            finally:
+                self._wal_file = None
+
+    async def close(self) -> None:
+        """Gracefully close HTTP client connections and WAL handle."""
+        self.close_wal()
+        await super().close()
+
+    def __del__(self):
+        """Safety cleanup for WAL file descriptor upon garbage collection."""
+        self.close_wal()
 
     async def crawl(self) -> List[Any]:
         """Default crawl returning collected records up to target quota."""
@@ -279,9 +320,69 @@ class TargetedCrawler(AsyncBaseCrawler):
         self.seen_keys.add(k)
         return False
 
+    def _write_wal(self, key: Optional[str], item: Any) -> None:
+        """Stream serialized record to append-only WAL."""
+        try:
+            f = self._get_wal_file()
+            if not f:
+                return
+            if hasattr(item, "model_dump"):
+                payload = {"key": key, "data": item.model_dump(mode="json")}
+            elif hasattr(item, "dict"):
+                payload = {"key": key, "data": item.dict()}
+            else:
+                payload = {"key": key, "data": item}
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            f.flush()
+        except Exception as exc:
+            logger.warning(f"WAL write failed for key '{key}': {exc}")
+
     def add(self, key: Optional[str], item: Any) -> bool:
         """Add item to collected list if not seen and quota not reached. Returns True if full."""
         if self.is_full or self.is_seen(key):
             return self.is_full
         self.collected.append(item)
+        if self.wal_enabled:
+            self._write_wal(key, item)
         return self.is_full
+
+    def recover_from_wal(self, model_cls: Optional[Any] = None) -> int:
+        """Recover collected records and deduplication keys from WAL. Returns count of recovered items."""
+        if not self.wal_path or not Path(self.wal_path).exists():
+            return 0
+        recovered_count = 0
+        try:
+            with open(self.wal_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Skipping corrupt WAL entry: {line[:50]}...")
+                        continue
+                    key = record.get("key")
+                    data = record.get("data")
+                    if self.is_seen(key):
+                        continue
+                    if model_cls and isinstance(data, dict):
+                        try:
+                            item = (
+                                model_cls.model_validate(data)
+                                if hasattr(model_cls, "model_validate")
+                                else model_cls(**data)
+                            )
+                        except Exception as parse_exc:
+                            logger.warning(f"WAL item validation failed: {parse_exc}")
+                            item = data
+                    else:
+                        item = data
+                    self.collected.append(item)
+                    recovered_count += 1
+                    if self.is_full:
+                        break
+            logger.info(f"Recovered {recovered_count} items from WAL ({self.wal_path}).")
+        except Exception as exc:
+            logger.error(f"Error recovering from WAL {self.wal_path}: {exc}")
+        return recovered_count

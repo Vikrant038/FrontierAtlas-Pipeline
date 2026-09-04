@@ -42,7 +42,7 @@ flowchart TD
   * **Memory Footprint**: ~15 MB per worker process (vs. ~350 MB per headless browser).
   * **Throughput**: Supports 2,000+ concurrent asynchronous connections per core via coroutine event loops.
   * **Cost**: $0.00 infrastructure cost beyond baseline VPS egress bandwidth.
-* **Pipeline Integration**: Implemented in [`src/crawlers/base.py:168`](file:///Users/vikranty/Documents/Project/Demo_project/src/crawlers/base.py#L168). Standard `httpx` connections that trigger HTTP 403 `BotBlockedError` automatically escalate to `fetch_tls()` with zero manual intervention.
+* **Pipeline Integration**: Implemented in `src/crawlers/base.py` (`fetch` / `fetch_json`). Standard `httpx` connections that trigger HTTP 403 `BotBlockedError` automatically escalate to `fetch_tls()` with zero manual intervention.
 
 ---
 
@@ -77,21 +77,26 @@ flowchart TD
 
 ## 3. Real Empirical Run Telemetry (FrontierAtlas Pipeline)
 
-During Phase I through Phase IV live ingestion runs across news publications, job boards, and startup portals, the pipeline recorded the following empirical escalation telemetry:
+> **Provenance note:** The pipeline's escalation counters (`AsyncBaseCrawler.escalation_attempts` / `escalation_successes`)
+> are in-memory, reset each process run, and earlier runs wrote logs only to stderr — so aggregate historical counts
+> were never persisted. The numbers below are from the **live single-run demonstration** in `scripts/demo_antibot.py`
+> (verbatim output in the demo log). As of the persistent file sink (`logs/pipeline.log`), escalation telemetry is now
+> durable and this table will be regenerated from real aggregates on future full runs.
 
-| Metric | Measured Value | Operational Insight |
+### Live Single-Run Demonstration (measured):
+
+| Metric | Measured Value | Source |
 |:---|:---:|:---|
-| **Total Ingestion Requests** | `3,248` | Bulk startups, products, papers, news, and jobs. |
-| **Plain HTTP Client Blocks (HTTP 403)** | `18` | Standard Python TLS fingerprints rejected by edge WAFs. |
-| **Escalations to `curl-cffi` (Chrome124)** | `18` | Automatic failover triggered via `base.py:168`. |
-| **`curl-cffi` First-Attempt Successes** | `14` | **77.8% Resolution Rate** without launching a browser. |
-| **Residual Blocks Requiring Browser/Solver** | `4` | Deep Cloudflare Turnstile / DataDome challenges (e.g. Glassdoor / Economist). |
-| **Mean Escalation Latency** | `412 ms` | Lightweight socket-level TLS re-negotiation. |
+| **Plain httpx on Axios article** | `403` (Cloudflare "Just a moment..." challenge page) | demo Act 1, step 1 |
+| **`curl-cffi` escalation on same URL** | `200 OK`, **193,003 bytes** article recovered | demo Act 1, step 2 |
+| **Plain httpx on Glassdoor jobs page** | `403 Forbidden` | demo Act 2, step 1 |
+| **`AsyncCamoufox(headless=True, geoip=True)`** | `200 OK`, **935,019 bytes** hydrated DOM, full listing title rendered | demo Act 2, step 2 |
+| **Escalation counters after demo** | `1 attempt / 1 success (100%)` | `base.py` class counters, in-run |
 
-### Concrete Production Sites Validated:
-- **Axios AI Signal** (`https://axios.com/...`): Plain `httpx` returns **403 Forbidden** (Cloudflare JA3 block); `curl-cffi` succeeds with **200 OK (193 KB article recovered)**.
-- **Financial Times** (`https://ft.com/...`): Plain `httpx` returns **403 Forbidden**; `curl-cffi` succeeds with **200 OK (142 KB recovered)**.
-- **Glassdoor AI Jobs** (`https://glassdoor.com/Job/...`): Plain `httpx` returns **403 Forbidden**; `AsyncCamoufox` bypasses challenge with **200 OK (935 KB hydrated DOM recovered)**.
+### Historically Observed 403→curl-cffi Escalation Sites (from pipeline source data):
+- **Axios** (`axios.com/2026/09/03/...`): httpx 403 → `curl-cffi` 200 OK (193 KB recovered — measured live, above).
+- **Financial Times** (`ft.com/content/...`): httpx 403 → `curl-cffi` 200 OK (article present in `exports/news.csv` from a run where the fetch path succeeded).
+- **The Economist** (`economist.com/...`): httpx 403 → `curl-cffi` 403 (2 URLs in verify_phase2 liveness audit — TLS impersonation insufficient, paywall-level protection; these are the honest residual-failure cases Tier C/D exist for).
 
 ---
 

@@ -138,7 +138,7 @@ async def test_crawler_resilience_zero_dropped_records_on_llm_failure(monkeypatc
 
     # Act - Jobs Crawler classification fallback
     jobs_crawler = JobsCrawler()
-    rec = jobs_crawler._build_record(
+    rec = await jobs_crawler._build_record(
         raw_company="OpenAI",
         title="Senior Research Scientist",
         raw_date="2026-09-04T10:00:00Z",

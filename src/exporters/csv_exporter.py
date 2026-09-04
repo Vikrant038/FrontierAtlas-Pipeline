@@ -57,7 +57,9 @@ class CSVExporter:
         for key, (_, filename, headers) in ENTITY_SPECS.items():
             records = datasets.get(key)
             if records is not None and len(records) > 0:
-                res[key] = self._write_csv(filename, headers, records)
-        if "logs" in datasets and datasets["logs"]:
-            self._write_csv("entity_resolution_logs.csv", ENTITY_SPECS["logs"][2], datasets["logs"])
+                res[key] = (
+                    self.export_logs(records, filename=filename)
+                    if key == "logs"
+                    else self._write_csv(filename, headers, records)
+                )
         return res

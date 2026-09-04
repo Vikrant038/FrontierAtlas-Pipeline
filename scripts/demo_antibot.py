@@ -14,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import httpx
 from src.crawlers.base import AsyncBaseCrawler
-from src.utils.logger import logger
 
 
 class DemoPipelineCrawler(AsyncBaseCrawler):

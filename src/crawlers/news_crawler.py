@@ -3,7 +3,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from rapidfuzz import fuzz, process
 
 from src.crawlers.base import AsyncBaseCrawler
@@ -96,35 +96,10 @@ class NewsCrawler(AsyncBaseCrawler):
         cleaned = re.sub(r"[^\w\s]", " ", cleaned)
         return " ".join(cleaned.split())
 
-    async def _process_entry(self, entry: Any, source_name: str) -> Optional[NewsRecord]:
-        title = getattr(entry, "title", "").strip()
-        link = getattr(entry, "link", "").strip()
-        if not title or not link or "news.ycombinator.com" in link:
-            return None
-
-        norm_url = self._normalize_url(link)
-        if norm_url in self._seen_urls:
-            return None
-
-        norm_title = self._normalize_title(title)
-        if self._seen_titles:
-            match = process.extractOne(norm_title, self._seen_titles, scorer=fuzz.token_sort_ratio, score_cutoff=90.0)
-            if match:
-                logger.info(f"Duplicate news title skipped: '{title}' ({match[1]:.1f}% match with '{match[0]}')")
-                return None
-
-        # Fast freshness pre-check: skip network fetch if explicit feed date fails 24h gate
-        raw_feed_date = getattr(entry, "published", None) or getattr(entry, "updated", None)
-        parsed_feed_date = parse_datetime_to_utc(raw_feed_date) if raw_feed_date else None
-        pub_date = self.check_freshness(raw_feed_date)
-        if parsed_feed_date is not None and pub_date is None:
-            return None
-
-        # Reserve dedup keys synchronously BEFORE awaiting the fetch: concurrent
-        # gather tasks would otherwise both pass the membership check (add-after-await race).
-        self._seen_urls.add(norm_url)
-        self._seen_titles.append(norm_title)
-
+    async def _fetch_full_text(
+        self, source_name: str, entry: Any, link: str, title: str
+    ) -> Tuple[str, bool, str]:
+        """Fetch the article body text; HN resolves the linked article from the RSS description blob."""
         full_text = ""
         is_full_text = False
         raw_html = ""
@@ -155,6 +130,66 @@ class NewsCrawler(AsyncBaseCrawler):
                     is_full_text = True
             except Exception as exc:
                 logger.debug(f"Full-text fetch failed for {link}: {exc}")
+        return full_text, is_full_text, raw_html
+
+    async def _build_summary(
+        self, source_name: str, entry: Any, title: str, full_text: str
+    ) -> Tuple[str, bool]:
+        """Construct a plain-text summary; LLM-generated when full text is available."""
+        # HN: rss_summary contains "Article URL: / Comments URL: / Points:" metadata even after HTML strip.
+        # For HN we use full_text exclusively (fetched article body or title-fallback — never metadata).
+        # Other sources: strip any residual HTML tags from the RSS snippet to keep the field plain-text.
+        if source_name == "Hacker News AI":
+            summary = (full_text[:300] if full_text else title)
+        else:
+            rss_summary_raw = getattr(entry, "summary", "") or ""
+            rss_summary_clean = clean_html_text(rss_summary_raw) if rss_summary_raw else ""
+            summary = rss_summary_clean or (full_text[:300] if full_text else title)
+        is_llm_summary = False
+        if full_text:
+            try:
+                llm_out = await llm_engine.extract_structured(
+                    raw_text=full_text,
+                    schema_cls=NewsSummarySchema,
+                    instruction=NEWS_SUMMARY_PROMPT,
+                )
+                if llm_out.summary and len(llm_out.summary.strip()) >= 20:
+                    summary = llm_out.summary.strip()
+                    is_llm_summary = True
+            except Exception as exc:
+                logger.debug(f"LLM summary extraction fallback for '{title}': {exc}")
+        return summary, is_llm_summary
+
+    async def _process_entry(self, entry: Any, source_name: str) -> Optional[NewsRecord]:
+        title = getattr(entry, "title", "").strip()
+        link = getattr(entry, "link", "").strip()
+        if not title or not link or "news.ycombinator.com" in link:
+            return None
+
+        norm_url = self._normalize_url(link)
+        if norm_url in self._seen_urls:
+            return None
+
+        norm_title = self._normalize_title(title)
+        if self._seen_titles:
+            match = process.extractOne(norm_title, self._seen_titles, scorer=fuzz.token_sort_ratio, score_cutoff=90.0)
+            if match:
+                logger.info(f"Duplicate news title skipped: '{title}' ({match[1]:.1f}% match with '{match[0]}')")
+                return None
+
+        # Fast freshness pre-check: skip network fetch if explicit feed date fails 24h gate
+        raw_feed_date = getattr(entry, "published", None) or getattr(entry, "updated", None)
+        parsed_feed_date = parse_datetime_to_utc(raw_feed_date) if raw_feed_date else None
+        pub_date = self.check_freshness(raw_feed_date)
+        if parsed_feed_date is not None and pub_date is None:
+            return None
+
+        # Reserve dedup keys synchronously BEFORE awaiting the fetch: concurrent
+        # gather tasks would otherwise both pass the membership check (add-after-await race).
+        self._seen_urls.add(norm_url)
+        self._seen_titles.append(norm_title)
+
+        full_text, is_full_text, raw_html = await self._fetch_full_text(source_name, entry, link, title)
 
         has_source_date = raw_feed_date is not None and str(raw_feed_date).strip() != ""
         date_inferred = False
@@ -192,28 +227,7 @@ class NewsCrawler(AsyncBaseCrawler):
             if is_full_text:
                 self.stats[source_name]["full_text"] += 1
 
-        # HN: rss_summary contains "Article URL: / Comments URL: / Points:" metadata even after HTML strip.
-        # For HN we use full_text exclusively (fetched article body or title-fallback — never metadata).
-        # Other sources: strip any residual HTML tags from the RSS snippet to keep the field plain-text.
-        if source_name == "Hacker News AI":
-            summary = (full_text[:300] if full_text else title)
-        else:
-            rss_summary_raw = getattr(entry, "summary", "") or ""
-            rss_summary_clean = clean_html_text(rss_summary_raw) if rss_summary_raw else ""
-            summary = rss_summary_clean or (full_text[:300] if full_text else title)
-        is_llm_summary = False
-        if is_full_text and full_text:
-            try:
-                llm_out = await llm_engine.extract_structured(
-                    raw_text=full_text,
-                    schema_cls=NewsSummarySchema,
-                    instruction=NEWS_SUMMARY_PROMPT,
-                )
-                if llm_out.summary and len(llm_out.summary.strip()) >= 20:
-                    summary = llm_out.summary.strip()
-                    is_llm_summary = True
-            except Exception as exc:
-                logger.debug(f"LLM summary extraction fallback for '{title}': {exc}")
+        summary, is_llm_summary = await self._build_summary(source_name, entry, title, full_text)
 
         if source_name in self.stats:
             if is_llm_summary:

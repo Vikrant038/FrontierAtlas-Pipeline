@@ -31,12 +31,12 @@ class StartupsCrawler(TargetedCrawler):
     def __init__(self, target_count: int = 1000, **kwargs):
         super().__init__(target_count=target_count, **kwargs)
 
-    def _add_startup(
+    async def _add_startup(
         self, raw_name: Optional[str], src_name: str, src_url: str, employee_count: Optional[int] = None
     ) -> bool:
         if not raw_name or self.is_full:
             return self.is_full
-        canonical, _ = entity_resolver.resolve(raw_name=raw_name, source_url=src_url, entity_type="STARTUP")
+        canonical, _ = await entity_resolver.resolve_async(raw_name=raw_name, source_url=src_url, entity_type="STARTUP")
         return self.add(
             canonical,
             StartupRecord(
@@ -44,6 +44,7 @@ class StartupsCrawler(TargetedCrawler):
                 content=StartupContent(entityName=canonical, data=StartupContentData(employeeCount=employee_count)),
             ),
         )
+
 
     async def _yc_candidates(self) -> AsyncIterator[tuple]:
         """Yield (name, source, url, employee_count) candidates from Y Combinator pages."""
@@ -99,14 +100,14 @@ class StartupsCrawler(TargetedCrawler):
     async def _harvest_candidates(self, candidates: AsyncIterator[tuple]) -> None:
         """Add startup candidates until the target quota is reached."""
         async for raw_name, src_name, src_url, emp in candidates:
-            if self._add_startup(raw_name, src_name, src_url, employee_count=emp):
+            if await self._add_startup(raw_name, src_name, src_url, employee_count=emp):
                 return
 
     async def crawl(self) -> List[StartupRecord]:
         """Execute multi-source AI startups collection up to target count."""
         logger.info(f"Starting StartupsCrawler (Target: {self.target_count})...")
         for raw_name, url in self.CANONICAL_SEEDS:
-            if self._add_startup(raw_name, "Canonical Seed List (Internal)", url):
+            if await self._add_startup(raw_name, "Canonical Seed List (Internal)", url):
                 break
         if not self.is_full:
             await self._harvest_candidates(self._yc_candidates())

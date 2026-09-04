@@ -11,6 +11,7 @@ import httpx
 from freezegun import freeze_time
 
 from src.crawlers.jobs_crawler import JobsCrawler
+from src.llm.rules import classify_role_family
 from src.schemas.entities import RoleFamilyEnum
 
 
@@ -57,15 +58,15 @@ async def test_jobs_crawler_freshness_filtering():
 
 
 def test_jobs_crawler_role_classification():
-    # Arrange & Act & Assert
-    assert JobsCrawler._classify_role("AI Research Scientist") == RoleFamilyEnum.RESEARCH
-    assert JobsCrawler._classify_role("Senior Python Backend Engineer") == RoleFamilyEnum.ENGINEERING
-    assert JobsCrawler._classify_role("AI Product Manager") == RoleFamilyEnum.PRODUCT
-    assert JobsCrawler._classify_role("UI/UX Designer") == RoleFamilyEnum.DESIGN
-    assert JobsCrawler._classify_role("Enterprise Account Executive") == RoleFamilyEnum.SALES
-    assert JobsCrawler._classify_role("Growth Marketing Lead") == RoleFamilyEnum.MARKETING
-    assert JobsCrawler._classify_role("Head of Operations") == RoleFamilyEnum.OPERATIONS
-    assert JobsCrawler._classify_role("General Specialist") == RoleFamilyEnum.OTHER
+    # Arrange & Act & Assert — shared rules.classify_role_family (JobsCrawler delegates to it)
+    assert classify_role_family("AI Research Scientist") == RoleFamilyEnum.RESEARCH
+    assert classify_role_family("Senior Python Backend Engineer") == RoleFamilyEnum.ENGINEERING
+    assert classify_role_family("AI Product Manager") == RoleFamilyEnum.PRODUCT
+    assert classify_role_family("UI/UX Designer") == RoleFamilyEnum.DESIGN
+    assert classify_role_family("Enterprise Account Executive") == RoleFamilyEnum.SALES
+    assert classify_role_family("Growth Marketing Lead") == RoleFamilyEnum.MARKETING
+    assert classify_role_family("Head of Operations") == RoleFamilyEnum.OPERATIONS
+    assert classify_role_family("General Specialist") == RoleFamilyEnum.OTHER
 
 
 def test_jobs_crawler_is_remote_derivation():

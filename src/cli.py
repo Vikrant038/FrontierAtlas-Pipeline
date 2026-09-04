@@ -4,6 +4,8 @@ Supports executing individual phases or running the end-to-end extraction and ex
 """
 
 import asyncio
+import signal
+from typing import Callable, Optional
 import click
 from rich.console import Console
 from rich.table import Table
@@ -17,8 +19,9 @@ from src.exporters.csv_exporter import CSVExporter
 from src.exporters.excel_exporter import ExcelExporter
 from src.exporters.graph_builder import KnowledgeGraphBuilder
 from src.exporters.sheets_exporter import GoogleSheetsExporter
+from src.llm.fallback_chain import llm_engine
 from src.resolution.normalizer import entity_resolver
-from src.utils.logger import setup_logging
+from src.utils.logger import logger, setup_logging
 
 console = Console()
 
@@ -27,6 +30,25 @@ async def _crawl(crawler_cls, **kwargs):
     """Execute a crawler safely within an async context manager for connection cleanup."""
     async with crawler_cls(**kwargs) as crawler:
         return await crawler.crawl()
+
+
+def _display_llm_telemetry() -> dict:
+    """Display LLM multi-tier extraction usage counts and persist to disk."""
+    tier_usage = llm_engine.get_tier_usage()
+    llm_engine.save_tier_telemetry()
+
+    llm_table = Table(title="LLM Multi-Tier Extraction Telemetry")
+    llm_table.add_column("Tier Provider", style="cyan", no_wrap=True)
+    llm_table.add_column("Extractions Served", style="magenta")
+    llm_table.add_column("Architecture Role", style="green")
+
+    llm_table.add_row("Tier 1: Google Gemini Flash", str(tier_usage.get("gemini", 0)), "Primary Extraction (gemini-3.5-flash-lite)")
+    llm_table.add_row("Tier 2: Groq Llama 3 / GPT-OSS", str(tier_usage.get("groq", 0)), "Secondary Fallback (high throughput)")
+    llm_table.add_row("Tier 3: DeepSeek / Custom Gateway", str(tier_usage.get("deepseek", 0)), "Tertiary Fallback (OpenAI-compatible)")
+    llm_table.add_row("Tier 4: Deterministic Zero-API", str(tier_usage.get("deterministic", 0)), "Hard Zero-Cost Heuristic Fallback")
+
+    console.print(llm_table)
+    return tier_usage
 
 
 def _handle_sheets_upload(
@@ -73,6 +95,29 @@ def _handle_sheets_upload(
         )
 
 
+def setup_signal_handlers(loop: asyncio.AbstractEventLoop, on_shutdown: Optional[Callable] = None):
+    """Register POSIX signal handlers for graceful cancellation and cache flushing."""
+    def _shutdown_handler(sig_name: str):
+        logger.warning(f"POSIX signal {sig_name} received: initiating graceful shutdown...")
+        console.print(f"\n[bold red]⚠️  Signal {sig_name} received. Flushing cache and shutting down...[/bold red]")
+        entity_resolver.save_cache()
+        if on_shutdown:
+            try:
+                on_shutdown()
+            except Exception as exc:
+                logger.debug(f"Shutdown hook error: {exc}")
+        for task in asyncio.all_tasks(loop):
+            if task is not asyncio.current_task(loop):
+                task.cancel()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, lambda s=sig: _shutdown_handler(s.name))
+        except (NotImplementedError, RuntimeError, ValueError) as exc:
+            # Fallback for environments where add_signal_handler is not permitted (e.g. non-main thread)
+            logger.debug(f"Could not register signal handler for {sig.name}: {exc}")
+
+
 async def run_pipeline(
     run_phase1: bool = True,
     run_phase2: bool = True,
@@ -81,26 +126,33 @@ async def run_pipeline(
     upload_sheets: bool = False,
 ):
     """Execute async pipeline phases and export structured deliverables."""
+    loop = asyncio.get_running_loop()
+    setup_signal_handlers(loop)
     console.print("[bold blue]🚀 Launching FrontierAtlas AI Data Intelligence Pipeline...[/bold blue]")
 
     startups, products, papers, jobs, news = [], [], [], [], []
 
-    # Phase I: Bulk Data Acquisition
-    if run_phase1:
-        console.print(f"[yellow]Executing Phase I: Bulk Acquisition (Target: {target_count})...[/yellow]")
-        papers, startups, products = await asyncio.gather(
-            _crawl(ResearchPapersCrawler, target_count=target_count),
-            _crawl(StartupsCrawler, target_count=target_count),
-            _crawl(ProductsCrawler, target_count=target_count),
-        )
+    try:
+        # Phase I: Bulk Data Acquisition
+        if run_phase1:
+            console.print(f"[yellow]Executing Phase I: Bulk Acquisition (Target: {target_count})...[/yellow]")
+            papers, startups, products = await asyncio.gather(
+                _crawl(ResearchPapersCrawler, target_count=target_count),
+                _crawl(StartupsCrawler, target_count=target_count),
+                _crawl(ProductsCrawler, target_count=target_count),
+            )
 
-    # Phase II: High-Fidelity Signal Ingestion (24h Freshness)
-    if run_phase2:
-        console.print("[yellow]Executing Phase II: 24h Signal Monitoring (5 News + 5 Job Boards)...[/yellow]")
-        news, jobs = await asyncio.gather(
-            _crawl(NewsCrawler),
-            _crawl(JobsCrawler),
-        )
+        # Phase II: High-Fidelity Signal Ingestion (24h Freshness)
+        if run_phase2:
+            console.print("[yellow]Executing Phase II: 24h Signal Monitoring (5 News + 5 Job Boards)...[/yellow]")
+            news, jobs = await asyncio.gather(
+                _crawl(NewsCrawler),
+                _crawl(JobsCrawler),
+            )
+    except asyncio.CancelledError:
+        console.print("[yellow]Pipeline execution interrupted. Saving entity cache and exiting...[/yellow]")
+        entity_resolver.save_cache()
+        raise
 
     # Phase IV: Entity Resolution Audit Logs
     # Every resolve() call during crawls already appended to the central audit log.
@@ -157,6 +209,7 @@ async def run_pipeline(
         table.add_row(label, str(count), status)
 
     console.print(table)
+    _display_llm_telemetry()
     console.print(f"[bold green]✨ Multi-Tab Excel exported to: {output_xlsx}[/bold green]")
 
     if upload_sheets:
@@ -186,15 +239,18 @@ def main(phase: str, target: int, output: str, sheets: bool):
     run_phase2 = phase in ("2", "all")
     # Default output aligns with scripts/verify_phase1.py expectations per phase.
     output_xlsx = output or (PHASE1_OUTPUT_XLSX if phase == "1" else DEFAULT_OUTPUT_XLSX)
-    asyncio.run(
-        run_pipeline(
-            run_phase1=run_phase1,
-            run_phase2=run_phase2,
-            target_count=target,
-            output_xlsx=output_xlsx,
-            upload_sheets=sheets,
+    try:
+        asyncio.run(
+            run_pipeline(
+                run_phase1=run_phase1,
+                run_phase2=run_phase2,
+                target_count=target,
+                output_xlsx=output_xlsx,
+                upload_sheets=sheets,
+            )
         )
-    )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print("\n[bold yellow]Pipeline stopped gracefully. State and cache preserved.[/bold yellow]")
 
 
 if __name__ == "__main__":

@@ -54,6 +54,9 @@ def parse_datetime_to_utc(date_val: Any) -> Optional[datetime]:
     return None
 
 
+MAX_CLOCK_DRIFT_HOURS: float = 10.0 / 60.0  # 10 minutes tolerance for publisher clock skew
+
+
 def is_fresh_24h(
     published_date: datetime,
     reference_now: Optional[datetime] = None,
@@ -69,16 +72,16 @@ def is_fresh_24h(
 
     age_hours = (now_utc - dt_utc).total_seconds() / 3600.0
 
-    # Allow small 5-minute clock drift, reject future timestamps beyond that
-    if age_hours < -0.08:
+    # Allow 10-minute clock drift for publisher server skew, reject future timestamps beyond that
+    if age_hours < -MAX_CLOCK_DRIFT_HOURS:
         logger.warning(f"Future timestamp rejected ({age_hours:.2f}h in future): {published_date}")
         return False, age_hours
 
-    return (0.0 <= age_hours <= max_age_hours), age_hours
+    return (-MAX_CLOCK_DRIFT_HOURS <= age_hours <= max_age_hours), age_hours
 
 
 def validate_freshness_24h(date_val: Any) -> Optional[datetime]:
-    """Parse date and enforce strict 24-hour freshness gate. Returns UTC datetime if fresh, None otherwise."""
+    """Parse date and enforce strict 24-hour freshness gate with 10-min drift tolerance. Returns UTC datetime if fresh, None otherwise."""
     dt = parse_datetime_to_utc(date_val)
     return dt if (dt and is_fresh_24h(dt)[0]) else None
 

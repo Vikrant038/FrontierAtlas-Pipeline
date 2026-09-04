@@ -37,15 +37,17 @@ class ResearchPapersCrawler(TargetedCrawler):
         # thousands of doomed requests in anonymous mode: 60 req/hr cap).
         self._github_quota_exhausted: bool = False
 
+    @staticmethod
+    def _seconds_until_slot(last_time: float, interval: float) -> float:
+        """Seconds to sleep so consecutive requests stay >= interval apart."""
+        return max(0.0, interval - (time.monotonic() - last_time))
+
     async def _pace_github(self) -> None:
         """Leaky-bucket pacing for GitHub API, safe under concurrent asyncio.gather enrichment."""
         # Serialize the check-then-sleep-then-stamp sequence: concurrent enrich
         # tasks each reserve a distinct slot spaced by the minimum interval.
         async with self._github_pace_lock:
-            now = time.monotonic()
-            elapsed = now - self._last_github_time
-            if elapsed < GITHUB_MIN_REQUEST_INTERVAL_SECONDS:
-                await asyncio.sleep(GITHUB_MIN_REQUEST_INTERVAL_SECONDS - elapsed)
+            await asyncio.sleep(self._seconds_until_slot(self._last_github_time, GITHUB_MIN_REQUEST_INTERVAL_SECONDS))
             self._last_github_time = time.monotonic()
 
     def _is_github_quota_exhaustion(self, exc: Exception) -> bool:
@@ -146,10 +148,8 @@ class ResearchPapersCrawler(TargetedCrawler):
 
     async def _query_arxiv_api(self, start: int, limit: int) -> List[Dict[str, Any]]:
         """Query official Arxiv Atom API with leaky-bucket pacing and automatic retry backoff."""
-        now = time.monotonic()
-        elapsed = now - self._last_arxiv_time
-        if elapsed < self.ARXIV_INTERVAL_SECONDS:
-            await asyncio.sleep(self.ARXIV_INTERVAL_SECONDS - elapsed)
+        # Arxiv API asks <= 3 requests/second; pace against the configured interval.
+        await asyncio.sleep(self._seconds_until_slot(self._last_arxiv_time, self.ARXIV_INTERVAL_SECONDS))
         self._last_arxiv_time = time.monotonic()
 
         params = {

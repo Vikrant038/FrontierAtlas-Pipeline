@@ -10,7 +10,6 @@ Executes 5 live operational scenarios against real provider keys from .env:
 """
 
 import asyncio
-import os
 import sys
 import time
 from pathlib import Path
@@ -20,7 +19,7 @@ from unittest.mock import AsyncMock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import settings
-from src.llm.fallback_chain import MultiTierLLMEngine, llm_engine
+from src.llm.fallback_chain import MultiTierLLMEngine
 from src.llm.prompts import (
     JOB_EXTRACTION_PROMPT,
     NEWS_SUMMARY_PROMPT,
@@ -29,9 +28,8 @@ from src.llm.prompts import (
     NewsSummarySchema,
     ProductPricingSchema,
 )
-from src.llm.rate_limiter import ProviderRateLimiter, rate_limiter
+from src.llm.rate_limiter import ProviderRateLimiter
 from src.schemas.entities import PricingModelEnum, RoleFamilyEnum
-from src.utils.logger import logger
 
 
 REAL_TECHCRUNCH_ARTICLE = """

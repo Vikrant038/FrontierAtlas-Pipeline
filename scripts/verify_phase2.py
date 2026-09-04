@@ -14,19 +14,17 @@ Usage:
 
 import asyncio
 import csv
-import re
 import sys
 from collections import Counter
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Tuple
 
 # Ensure repository root is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import httpx
-from curl_cffi.requests import Session as CurlSession
+from _liveness import audit_urls
 
+from src.crawlers.jobs_crawler import AI_KEYWORD_PATTERN
 from src.exporters.base import ENTITY_SPECS
 from src.utils.date_normalizer import parse_datetime_to_utc
 
@@ -35,16 +33,6 @@ DEFAULT_NEWS_PATH = Path("exports/news.csv")
 
 JOBS_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_JOBS_PATH
 NEWS_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_NEWS_PATH
-
-BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
 
 def load_csv_rows(filepath: Path) -> Tuple[List[str], List[Dict[str, str]]]:
     """Load headers and rows from a CSV file."""
@@ -77,59 +65,6 @@ def audit_freshness(rows: List[Dict[str, str]], date_header: str) -> Tuple[int, 
         else:
             stale_records.append((idx, row.get("source.url"), f"{age_hours:.2f}h old"))
     return fresh_count, stale_records
-
-
-async def probe_url(client: httpx.AsyncClient, sem: asyncio.Semaphore, url: str) -> Tuple[str, int, str]:
-    """Test URL liveness with browser UA and curl-cffi TLS fallback on 403."""
-    if not url or not url.startswith("http"):
-        return url, 0, "Invalid URL schema"
-
-    async with sem:
-        try:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                return url, 200, "OK"
-            if resp.status_code in (403, 405):
-                # 1. Test HEAD request (works for bot-gated pages like Himalayas that accept HEAD)
-                try:
-                    head_resp = await client.head(url)
-                    if head_resp.status_code == 200:
-                        return url, 200, "OK (HEAD)"
-                except Exception:
-                    pass
-                # 2. Attempt socket-level TLS impersonation via curl-cffi
-                try:
-                    with CurlSession(impersonate="chrome124") as curl_s:
-                        c_resp = curl_s.get(url, headers=BROWSER_HEADERS, timeout=10)
-                        if c_resp.status_code == 200:
-                            return url, 200, "OK (TLS fallback)"
-                        return url, c_resp.status_code, f"HTTP {c_resp.status_code} (TLS)"
-                except Exception as c_exc:
-                    return url, resp.status_code, f"HTTP {resp.status_code} ({c_exc.__class__.__name__})"
-            return url, resp.status_code, f"HTTP {resp.status_code}"
-        except httpx.TimeoutException:
-            return url, 0, "Request Timeout (10s)"
-        except Exception as exc:
-            return url, 0, f"Error: {exc.__class__.__name__}"
-
-
-async def audit_urls(urls: List[str]) -> Tuple[int, int, List[Tuple[str, int, str]]]:
-    """Audit liveness of unique URLs concurrently."""
-    unique_urls = list(dict.fromkeys(urls))
-    sem = asyncio.Semaphore(12)
-    async with httpx.AsyncClient(headers=BROWSER_HEADERS, follow_redirects=True, timeout=10.0) as client:
-        tasks = [probe_url(client, sem, u) for u in unique_urls]
-        results = await asyncio.gather(*tasks)
-
-    passed = 0
-    non_200 = []
-    for u, status, msg in results:
-        if status == 200:
-            passed += 1
-        else:
-            non_200.append((u, status, msg))
-
-    return passed, len(unique_urls), non_200
 
 
 def main() -> None:
@@ -239,14 +174,10 @@ def main() -> None:
 
     # 5. AI Relevance Keyword Audit on Job Titles
     print("--- 5. AI Relevance Keyword Audit on Job Titles ---")
-    ai_title_pattern = re.compile(
-        r"\bai\b|machine learning|\bml\b|\bllm\b|data scien|deep learning",
-        re.IGNORECASE,
-    )
     non_ai_jobs = []
     for idx, r in enumerate(jobs_rows, start=1):
         title = r.get("content.title", "")
-        if not ai_title_pattern.search(title):
+        if not AI_KEYWORD_PATTERN.search(title):
             non_ai_jobs.append((idx, r.get("source.name", ""), title))
 
     if non_ai_jobs:

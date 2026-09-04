@@ -7,7 +7,9 @@ key absent = new since last run.
 
 import json
 import os
+import tempfile
 from typing import Set
+
 
 from src.utils.logger import logger
 
@@ -27,19 +29,56 @@ def load_seen_keys(crawler_name: str, state_path: str = STATE_PATH) -> Set[str]:
         return set()
 
 
-def save_seen_keys(crawler_name: str, seen_keys: Set[str], state_path: str = STATE_PATH) -> None:
-    """Persist this run's collected keys for the next run's novelty comparison."""
-    state = {}
-    if os.path.exists(state_path):
-        try:
-            with open(state_path, "r", encoding="utf-8") as state_file:
-                state = json.load(state_file)
-        except (json.JSONDecodeError, OSError):
-            state = {}
-    state[crawler_name] = sorted(seen_keys)
+def _read_state_locked(state_path: str) -> dict:
+    """Helper to safely read current state under an active lock."""
+    if not os.path.exists(state_path):
+        return {}
     try:
-        os.makedirs(os.path.dirname(os.path.abspath(state_path)), exist_ok=True)
-        with open(state_path, "w", encoding="utf-8") as state_file:
-            json.dump(state, state_file)
+        with open(state_path, "r", encoding="utf-8") as state_file:
+            data = json.load(state_file)
+            return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_seen_keys(crawler_name: str, seen_keys: Set[str], state_path: str = STATE_PATH) -> None:
+    """
+    Persist this run's collected keys for the next run's novelty comparison.
+    Guarantees atomic updates and prevents lost updates across concurrent crawlers
+    using advisory file locking (fcntl.flock) and tempfile atomic replacement.
+    """
+    export_dir = os.path.dirname(os.path.abspath(state_path))
+    os.makedirs(export_dir, exist_ok=True)
+    lock_path = state_path + ".lock"
+
+    try:
+        import fcntl
+        has_fcntl = True
+    except ImportError:
+        has_fcntl = False
+
+    try:
+        with open(lock_path, "w", encoding="utf-8") as lock_file:
+            if has_fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                state = _read_state_locked(state_path)
+                state[crawler_name] = sorted(list(seen_keys))
+
+                temp_fd, temp_path = tempfile.mkstemp(dir=export_dir, prefix="run_state_", suffix=".tmp")
+                try:
+                    with open(temp_fd, "w", encoding="utf-8") as temp_file:
+                        json.dump(state, temp_file, indent=2)
+                        temp_file.flush()
+                        os.fsync(temp_file.fileno())
+                    os.replace(temp_path, state_path)
+                except Exception:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    raise
+            finally:
+                if has_fcntl:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except OSError as state_exc:
-        logger.error(f"Failed to persist run state for {crawler_name}: {state_exc}")
+        logger.error(f"Failed to persist run state atomically for {crawler_name}: {state_exc}")
+

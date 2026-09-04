@@ -1,7 +1,7 @@
 """
 Multi-Tier LLM Fallback Chain with Token Budgeting & Concurrency Bounding.
 Hierarchy:
-  Tier 1: Google Gemini (gemini-3.6-flash)
+  Tier 1: Google Gemini (gemini-3.5-flash-lite)
   Tier 2: Groq / OpenAI-compatible Secondary (e.g. openai/gpt-oss-120b)
   Tier 3: Custom Third-Party OpenAI-compatible Gateway (e.g. DeepSeek V4 Flash)
   Tier 4: Deterministic Zero-API Heuristics & Selectors
@@ -95,7 +95,7 @@ class MultiTierLLMEngine:
 
     @_LLM_RETRY
     async def _call_gemini(self, prompt: str, schema_json: str) -> str:
-        """Tier 1: Google Gemini Flash using google-genai AsyncChat (AFC-safe path)."""
+        """Tier 1: Google Gemini Flash using google-genai AsyncChat (AFC-recommended path)."""
         if not settings.gemini_api_key:
             raise LLMTransientError("Gemini API key is not configured.")
         if self._gemini_exhausted:
@@ -107,15 +107,16 @@ class MultiTierLLMEngine:
             client = self._clients["gemini"]
             from google.genai import types
 
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=settings.gemini_model,
-                    contents=f"{prompt}\n\nStrict JSON schema:\n{schema_json}",
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                    ),
+            # Fresh chat per call: schema differs per request; stateless extraction.
+            chat = client.aio.chats.create(
+                model=settings.gemini_model,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
                 ),
+            )
+            response = await asyncio.wait_for(
+                chat.send_message(f"{prompt}\n\nStrict JSON schema:\n{schema_json}"),
                 timeout=10.0,
             )
             return response.text or "{}"

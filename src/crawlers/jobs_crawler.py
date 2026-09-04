@@ -1,8 +1,7 @@
 import asyncio
 import re
 from datetime import datetime, timezone
-from typing import Any, List, Optional
-import feedparser
+from typing import Any, List, Optional, Tuple
 
 from src.crawlers.base import AsyncBaseCrawler
 from src.llm.fallback_chain import llm_engine
@@ -40,11 +39,7 @@ class JobsCrawler(AsyncBaseCrawler):
             return True
         return False
 
-    @staticmethod
-    def _classify_role(title: str) -> RoleFamilyEnum:
-        return classify_role_family(title)
-
-    def _build_record(
+    async def _build_record(
         self,
         raw_company: str,
         title: str,
@@ -69,7 +64,7 @@ class JobsCrawler(AsyncBaseCrawler):
             pub_date = datetime.now(timezone.utc)
             self._novelty_keys.add(norm_url)
             logger.debug(f"Dateless posting treated as new-since-last-run: '{title}' ({source_name}).")
-        canonical, _ = entity_resolver.resolve(raw_name=raw_company, source_url=url, entity_type="STARTUP")
+        canonical, _ = await entity_resolver.resolve_async(raw_name=raw_company, source_url=url, entity_type="STARTUP")
         return JobRecord(
             source=SourceMetadata(name=source_name, url=url),
             content=JobContent(
@@ -77,40 +72,35 @@ class JobsCrawler(AsyncBaseCrawler):
                 title=title,
                 date=pub_date,
                 is_remote=remote,
-                role_family=role_family if role_family is not None else self._classify_role(title),
+                role_family=role_family if role_family is not None else classify_role_family(title),
             ),
         )
 
     async def fetch_remoteok(self) -> List[JobRecord]:
         records: List[JobRecord] = []
         try:
-            client = await self.get_client()
-            url = "https://remoteok.com/api?tag=ai"
-            resp = await client.get(url, headers=self.headers)
-            logger.info(f"[RemoteOK] Raw response status: {resp.status_code}, length: {len(resp.text)} bytes ({url})")
-            if resp.status_code == 200:
-                items = resp.json()
-                items = items[1:] if isinstance(items, list) and items and "legal" in str(items[0]) else (items or [])
-                survived_filter = 0
-                for item in items:
-                    pos = item.get("position") or ""
-                    if not AI_KEYWORD_PATTERN.search(pos):
-                        continue
-                    survived_filter += 1
-                    tags = item.get("tags") or []
-                    loc = f"{item.get('location', '')} {item.get('region', '')}"
-                    is_remote = self._is_remote(location=loc, tags=tags, title=pos)
-                    rec = self._build_record(
-                        raw_company=item.get("company") or "Unknown",
-                        title=pos,
-                        raw_date=item.get("date"),
-                        url=item.get("url") or f"https://remoteok.com/jobs/{item.get('id', '')}",
-                        source_name="RemoteOK AI",
-                        remote=is_remote,
-                    )
-                    if rec:
-                        records.append(rec)
-                logger.info(f"[RemoteOK] Total items: {len(items)}, survived AI title filter: {survived_filter}, fresh (<24h): {len(records)}")
+            items = await self.fetch_json("https://remoteok.com/api?tag=ai")
+            items = items[1:] if isinstance(items, list) and items and "legal" in str(items[0]) else (items or [])
+            survived_filter = 0
+            for item in items:
+                pos = item.get("position") or ""
+                if not AI_KEYWORD_PATTERN.search(pos):
+                    continue
+                survived_filter += 1
+                tags = item.get("tags") or []
+                loc = f"{item.get('location', '')} {item.get('region', '')}"
+                is_remote = self._is_remote(location=loc, tags=tags, title=pos)
+                rec = await self._build_record(
+                    raw_company=item.get("company") or "Unknown",
+                    title=pos,
+                    raw_date=item.get("date"),
+                    url=item.get("url") or f"https://remoteok.com/jobs/{item.get('id', '')}",
+                    source_name="RemoteOK AI",
+                    remote=is_remote,
+                )
+                if rec:
+                    records.append(rec)
+            logger.info(f"[RemoteOK] Total items: {len(items)}, survived AI title filter: {survived_filter}, fresh (<24h): {len(records)}")
         except Exception as exc:
             logger.warning(f"RemoteOK fetch error: {exc}")
         return records
@@ -129,7 +119,7 @@ class JobsCrawler(AsyncBaseCrawler):
                 loc = item.get("location", "")
                 tags = item.get("tags", [])
                 is_remote = bool(item.get("remote", False)) or self._is_remote(location=loc, tags=tags, title=title)
-                rec = self._build_record(
+                rec = await self._build_record(
                     raw_company=item.get("company_name", "Unknown"),
                     title=title,
                     raw_date=item.get("created_at"),
@@ -143,24 +133,34 @@ class JobsCrawler(AsyncBaseCrawler):
             logger.warning(f"Arbeitnow fetch error: {exc}")
         return records
 
+    @staticmethod
+    def _split_company_title(raw_title: str, author: str = "", split_colon: bool = False) -> Tuple[str, str]:
+        """Split 'Company: Job Title' or 'Company is hiring ...' feed titles into (company, title)."""
+        if split_colon and ":" in raw_title:
+            company, title = [p.strip() for p in raw_title.split(":", 1)]
+        elif "is hiring" in raw_title:
+            company = raw_title.split("is hiring")[0].strip()
+            title = raw_title
+        else:
+            company = author or "AI Startup"
+            title = raw_title
+        return company, title
+
     async def _fetch_feed_jobs(self, url: str, source_name: str, split_colon: bool = False) -> List[JobRecord]:
         try:
             entries = await self.fetch_feed(url)
             records: List[JobRecord] = []
             for entry in entries:
                 raw_title = getattr(entry, "title", "")
-                if split_colon and ":" in raw_title:
-                    company, title = [p.strip() for p in raw_title.split(":", 1)]
-                elif "is hiring" in raw_title:
-                    company = raw_title.split("is hiring")[0].strip()
-                    title = raw_title
-                else:
-                    company = getattr(entry, "author", "") or getattr(entry, "company", "AI Startup")
-                    title = raw_title
+                company, title = self._split_company_title(
+                    raw_title,
+                    author=getattr(entry, "author", "") or getattr(entry, "company", ""),
+                    split_colon=split_colon,
+                )
                 if not AI_KEYWORD_PATTERN.search(title):
                     continue
                 is_remote = self._is_remote(location=getattr(entry, "location", ""), title=title)
-                rec = self._build_record(
+                rec = await self._build_record(
                     raw_company=company,
                     title=title,
                     raw_date=getattr(entry, "published", None),
@@ -178,27 +178,24 @@ class JobsCrawler(AsyncBaseCrawler):
     async def fetch_himalayas(self) -> List[JobRecord]:
         records: List[JobRecord] = []
         try:
-            client = await self.get_client()
-            resp = await client.get("https://himalayas.app/jobs/api?q=ai", headers=self.headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                for job in (data or {}).get("jobs", []):
-                    title = job.get("title", "")
-                    if not AI_KEYWORD_PATTERN.search(title):
-                        continue
-                    company = job.get("companyName") or "Himalayas Tech"
-                    url = job.get("applicationLink") or job.get("guid") or ""
-                    pub_date = job.get("pubDate")
-                    rec = self._build_record(
-                        raw_company=company,
-                        title=title,
-                        raw_date=pub_date,
-                        url=url,
-                        source_name="Himalayas AI",
-                        remote=True,
-                    )
-                    if rec:
-                        records.append(rec)
+            data = await self.fetch_json("https://himalayas.app/jobs/api?q=ai")
+            for job in (data or {}).get("jobs", []):
+                title = job.get("title", "")
+                if not AI_KEYWORD_PATTERN.search(title):
+                    continue
+                company = job.get("companyName") or "Himalayas Tech"
+                url = job.get("applicationLink") or job.get("guid") or ""
+                pub_date = job.get("pubDate")
+                rec = await self._build_record(
+                    raw_company=company,
+                    title=title,
+                    raw_date=pub_date,
+                    url=url,
+                    source_name="Himalayas AI",
+                    remote=True,
+                )
+                if rec:
+                    records.append(rec)
         except Exception as exc:
             logger.warning(f"Himalayas API fetch error: {exc}")
         if not records:
@@ -214,14 +211,12 @@ class JobsCrawler(AsyncBaseCrawler):
             "https://weworkremotely.com/categories/remote-customer-support-jobs.rss",
         ]
         try:
-            client = await self.get_client()
             for url in urls:
-                resp = await client.get(url, headers=self.headers)
-                if resp.status_code != 200:
-                    logger.info(f"[WeWorkRemotely] {url} -> status: {resp.status_code}")
+                try:
+                    entries = await self.fetch_feed(url)
+                except Exception as exc:
+                    logger.warning(f"[WeWorkRemotely] {url} fetch error: {exc}")
                     continue
-                feed = feedparser.parse(resp.text)
-                entries = getattr(feed, "entries", [])
                 survived_ai_filter = 0
                 fresh_count = 0
                 for entry in entries:
@@ -229,16 +224,16 @@ class JobsCrawler(AsyncBaseCrawler):
                     if not link or link in seen_urls:
                         continue
                     raw_title = getattr(entry, "title", "")
-                    if ":" in raw_title:
-                        company, title = [p.strip() for p in raw_title.split(":", 1)]
-                    else:
-                        company = getattr(entry, "author", "") or "AI Startup"
-                        title = raw_title
+                    company, title = self._split_company_title(
+                        raw_title,
+                        author=getattr(entry, "author", "") or "AI Startup",
+                        split_colon=True,
+                    )
                     if not AI_KEYWORD_PATTERN.search(title):
                         continue
                     survived_ai_filter += 1
                     is_remote = self._is_remote(location=getattr(entry, "location", ""), title=title)
-                    rec = self._build_record(
+                    rec = await self._build_record(
                         raw_company=company,
                         title=title,
                         raw_date=getattr(entry, "published", None),
@@ -251,9 +246,8 @@ class JobsCrawler(AsyncBaseCrawler):
                         records.append(rec)
                         fresh_count += 1
                 logger.info(
-                    f"[WeWorkRemotely] {url} -> status: {resp.status_code}, "
-                    f"entries: {len(entries)}, survived AI filter: {survived_ai_filter}, "
-                    f"fresh (<24h): {fresh_count}"
+                    f"[WeWorkRemotely] {url} -> entries: {len(entries)}, "
+                    f"survived AI filter: {survived_ai_filter}, fresh (<24h): {fresh_count}"
                 )
         except Exception as exc:
             logger.warning(f"WeWorkRemotely fetch error: {exc}")
@@ -282,6 +276,9 @@ class JobsCrawler(AsyncBaseCrawler):
                     loc = ""
                 if not AI_KEYWORD_PATTERN.search(title):
                     continue
+                raw_date = getattr(entry, "published", None)
+                if not self.check_freshness(raw_date):
+                    continue
                 apply_urls = re.findall(r'https?://[^\s<>"\'\)]+', desc)
                 apply_url = next(
                     (u for u in apply_urls if not any(d in u for d in ("ycombinator.com", "hnrss.org", "w3.org"))),
@@ -289,7 +286,7 @@ class JobsCrawler(AsyncBaseCrawler):
                 )
                 # Default heuristics
                 is_remote = self._is_remote(location=loc, title=title)
-                role_fam = self._classify_role(title)
+                role_fam = classify_role_family(title)
 
                 # LLM extraction when description text is available (clean_desc >= 40 chars)
                 if len(clean_desc) >= 40:
@@ -307,7 +304,7 @@ class JobsCrawler(AsyncBaseCrawler):
                     except Exception as exc:
                         logger.debug(f"LLM job extraction fallback for '{title}': {exc}")
 
-                rec = self._build_record(
+                rec = await self._build_record(
                     raw_company=company,
                     title=title,
                     raw_date=getattr(entry, "published", None),

@@ -3,6 +3,7 @@ Structured logging system with automatic PII and secret redaction.
 Enforces CODING_STANDARDS.md Pillar 4.7 and GUARDRAILS.md Module 6.4.
 """
 
+import os
 import re
 import sys
 from typing import Any, Dict
@@ -15,6 +16,8 @@ SENSITIVE_KEY_RE = re.compile(
 CREDENTIAL_INLINE_RE = re.compile(
     r"(?i)(bearer\s+[a-zA-Z0-9_\-\.]{15,}|(api_?key|token|secret)\s*[:=]\s*['\"]?[a-zA-Z0-9_\-\.]{8,}['\"]?)"
 )
+
+LOG_FILE_PATH = os.path.join("logs", "pipeline.log")
 
 
 def _mask_value(key: str, val: Any) -> Any:
@@ -39,7 +42,7 @@ def redact_record(record: Dict[str, Any]) -> bool:
 
 
 def setup_logging(log_level: str = "INFO") -> None:
-    """Configure Loguru with formatting and automated secret redaction."""
+    """Configure Loguru with stderr console + persistent file sink (telemetry source)."""
     logger.remove()
     log_format = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
@@ -55,6 +58,18 @@ def setup_logging(log_level: str = "INFO") -> None:
         filter=redact_record,
         backtrace=True,
         diagnose=False
+    )
+    # Persistent plain-text sink: escalation telemetry and run audits read from here.
+    logger.add(
+        LOG_FILE_PATH,
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message} {extra}",
+        level="DEBUG",
+        filter=redact_record,
+        rotation="10 MB",
+        retention=5,
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
     )
 
 

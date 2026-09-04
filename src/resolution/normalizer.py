@@ -19,6 +19,13 @@ from src.resolution.seed_data import (
     KNOWN_ALIASES,
 )
 
+# Shared executor bridging sync resolve() to the async LLM tier. A fresh
+# ThreadPoolExecutor per call (as originally) created thousands of thread
+# pools during a full pipeline run (one per entity resolution).
+_RESOLVE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="entity-resolve"
+)
+
 
 def extract_domain(url: str) -> str:
     """Extract root domain from URL (e.g. 'https://api.openai.com/v1' -> 'openai.com')."""
@@ -262,10 +269,9 @@ class EntityResolver:
             loop = None
 
         if loop and loop.is_running():
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                return executor.submit(
-                    asyncio.run, self.resolve_async(raw_name, source_url, entity_type)
-                ).result()
+            return _RESOLVE_EXECUTOR.submit(
+                asyncio.run, self.resolve_async(raw_name, source_url, entity_type)
+            ).result()
         else:
             return asyncio.run(self.resolve_async(raw_name, source_url, entity_type))
 
