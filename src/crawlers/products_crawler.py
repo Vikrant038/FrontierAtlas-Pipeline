@@ -7,7 +7,9 @@ import re
 from typing import Dict, List, Tuple
 
 from src.crawlers.base import TargetedCrawler
-from src.resolution.normalizer import entity_resolver
+from src.llm.fallback_chain import llm_engine
+from src.llm.prompts import PRODUCT_PRICING_PROMPT, ProductPricingSchema
+from src.resolution.normalizer import entity_resolver, extract_domain
 from src.schemas.entities import PricingModelEnum, ProductContent, ProductRecord, SourceMetadata
 from src.utils.logger import logger
 
@@ -65,10 +67,37 @@ class ProductsCrawler(TargetedCrawler):
             return PricingModelEnum.PAID
         return PricingModelEnum.FREEMIUM
 
+    async def classify_pricing_async(self, name: str, url: str, desc: str) -> PricingModelEnum:
+        """Classify pricing model using LLM fallback when description is available (>=15 chars), falling back to keyword rules."""
+        n = (name or "").lower().strip()
+        if n in KNOWN_PRICING:
+            return KNOWN_PRICING[n]
+
+        desc_clean = (desc or "").strip()
+        if len(desc_clean) >= 15:
+            try:
+                input_text = f"Product Name: {name}\nURL: {url}\nDescription: {desc_clean}"
+                llm_out = await llm_engine.extract_structured(
+                    raw_text=input_text,
+                    schema_cls=ProductPricingSchema,
+                    instruction=PRODUCT_PRICING_PROMPT,
+                )
+                if llm_out and isinstance(llm_out.pricingModel, PricingModelEnum):
+                    return llm_out.pricingModel
+            except Exception as exc:
+                logger.debug(f"LLM pricing classification fallback for '{name}': {exc}")
+
+        return self.classify_pricing(name, url, desc)
+
     @staticmethod
     def _extract_maker(name: str, desc: str, url: str) -> str:
         m = re.search(r"\b(?:by|from)\s+([A-Z][A-Za-z0-9\s&.-]{1,30}?)(?:\s+(?:is|has|was|provides|\.|\,)|$)", desc)
         raw_maker = m.group(1).strip() if m else name
+        # Sentence-like fallbacks (essay titles, citations) are not companies:
+        # derive the org from the product URL domain instead.
+        if len(raw_maker.split()) > 5 or raw_maker.endswith((".", "!", "?")):
+            domain = extract_domain(url)
+            raw_maker = domain.split(".")[0].capitalize() if domain else name
         return entity_resolver.resolve(raw_name=raw_maker, source_url=url, entity_type="STARTUP")[0]
 
     def _parse_awesome_agents(self, text: str) -> List[Tuple[str, str, str]]:
@@ -122,13 +151,16 @@ class ProductsCrawler(TargetedCrawler):
                 for name, item_url, desc in items:
                     if not name or "#" in item_url:
                         continue
+                    if self.is_full:
+                        break
+                    pricing = await self.classify_pricing_async(name, item_url, desc)
                     record = ProductRecord(
                         source=SourceMetadata(name=src_name, url=item_url),
                         content=ProductContent(
                             startupName=self._extract_maker(name, desc, item_url),
                             productName=name,
                             productUrl=item_url,
-                            pricingModel=self.classify_pricing(name, item_url, desc),
+                            pricingModel=pricing,
                         ),
                     )
                     if self.add(name, record):

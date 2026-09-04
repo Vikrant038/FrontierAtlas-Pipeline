@@ -5,6 +5,8 @@ from typing import Any, List, Optional
 import feedparser
 
 from src.crawlers.base import AsyncBaseCrawler
+from src.llm.fallback_chain import llm_engine
+from src.llm.prompts import JOB_EXTRACTION_PROMPT, JobExtractionSchema
 from src.schemas.entities import JobContent, JobRecord, RoleFamilyEnum, SourceMetadata
 from src.resolution.normalizer import entity_resolver
 from src.utils.date_normalizer import infer_content_freshness
@@ -54,7 +56,16 @@ class JobsCrawler(AsyncBaseCrawler):
                 return role
         return RoleFamilyEnum.OTHER
 
-    def _build_record(self, raw_company: str, title: str, raw_date: Any, url: str, source_name: str, remote: bool) -> Optional[JobRecord]:
+    def _build_record(
+        self,
+        raw_company: str,
+        title: str,
+        raw_date: Any,
+        url: str,
+        source_name: str,
+        remote: bool,
+        role_family: Optional[RoleFamilyEnum] = None,
+    ) -> Optional[JobRecord]:
         # Freshness gate: strict posting date, then text inference, then cross-run novelty for dateless entries.
         pub_date = self.check_freshness(raw_date)
         if not pub_date and raw_date:
@@ -73,7 +84,13 @@ class JobsCrawler(AsyncBaseCrawler):
         canonical, _ = entity_resolver.resolve(raw_name=raw_company, source_url=url, entity_type="STARTUP")
         return JobRecord(
             source=SourceMetadata(name=source_name, url=url),
-            content=JobContent(company=canonical, title=title, date=pub_date, is_remote=remote, role_family=self._classify_role(title)),
+            content=JobContent(
+                company=canonical,
+                title=title,
+                date=pub_date,
+                is_remote=remote,
+                role_family=role_family if role_family is not None else self._classify_role(title),
+            ),
         )
 
     async def fetch_remoteok(self) -> List[JobRecord]:
@@ -282,13 +299,34 @@ class JobsCrawler(AsyncBaseCrawler):
                     (u for u in apply_urls if not any(d in u for d in ("ycombinator.com", "hnrss.org", "w3.org"))),
                     getattr(entry, "link", ""),
                 )
+                # Default heuristics
+                is_remote = self._is_remote(location=loc, title=title)
+                role_fam = self._classify_role(title)
+
+                # LLM extraction when description text is available (clean_desc >= 40 chars)
+                if len(clean_desc) >= 40:
+                    try:
+                        input_text = f"Job Title: {title}\nLocation: {loc}\nDescription:\n{clean_desc[:2000]}"
+                        llm_out = await llm_engine.extract_structured(
+                            raw_text=input_text,
+                            schema_cls=JobExtractionSchema,
+                            instruction=JOB_EXTRACTION_PROMPT,
+                        )
+                        if llm_out:
+                            is_remote = llm_out.is_remote
+                            if isinstance(llm_out.role_family, RoleFamilyEnum):
+                                role_fam = llm_out.role_family
+                    except Exception as exc:
+                        logger.debug(f"LLM job extraction fallback for '{title}': {exc}")
+
                 rec = self._build_record(
                     raw_company=company,
                     title=title,
                     raw_date=getattr(entry, "published", None),
                     url=apply_url,
                     source_name="YC HN Who Is Hiring AI",
-                    remote=self._is_remote(location=loc, title=title),
+                    remote=is_remote,
+                    role_family=role_fam,
                 )
                 if rec:
                     records.append(rec)

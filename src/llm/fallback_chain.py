@@ -1,5 +1,22 @@
+"""
+Multi-Tier LLM Fallback Chain with Token Budgeting & Concurrency Bounding.
+Hierarchy:
+  Tier 1: Google Gemini (gemini-3.6-flash)
+  Tier 2: Groq / OpenAI-compatible Secondary (e.g. openai/gpt-oss-120b)
+  Tier 3: Custom Third-Party OpenAI-compatible Gateway (e.g. DeepSeek V4 Flash)
+  Tier 4: Deterministic Zero-API Heuristics & Selectors
+
+Guarantees:
+  - Bounded concurrency via asyncio.Semaphore(5) (no RPM exhaustion)
+  - Exponential backoff with jitter on HTTP 429
+  - Token budgeting via cl100k_base (no HTTP 413)
+  - Zero dropped records: falls back to deterministic heuristics
+"""
+
+import asyncio
 import json
-from typing import Any, Dict, Optional, Type
+import re
+from typing import Any, Dict, Optional, Type, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from tenacity import (
@@ -11,7 +28,10 @@ from tenacity import (
 
 from src.config import settings
 from src.llm.chunker import chunk_to_budget
+from src.schemas.entities import PricingModelEnum, RoleFamilyEnum
 from src.utils.logger import logger
+
+T = TypeVar("T", bound=BaseModel)
 
 
 class ExtractionFailureError(Exception):
@@ -37,30 +57,64 @@ _LLM_RETRY = retry(
 )
 
 
+def _clean_json_markdown(text: str) -> str:
+    """Strip markdown code block wrappers (```json ... ```) from LLM output."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
+        t = re.sub(r"\s*```$", "", t)
+    return t.strip()
+
+
 class MultiTierLLMEngine:
-    """Multi-tier extraction engine: Gemini -> Groq -> DeepSeek -> Deterministic."""
+    """Production-grade LLM orchestrator with multi-provider failover and concurrency limits."""
 
     def __init__(self):
         self._clients: Dict[str, Any] = {}
+        self._semaphore: Optional[asyncio.Semaphore] = None
+        self._semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if self._semaphore is None or self._semaphore_loop is not loop:
+            self._semaphore = asyncio.Semaphore(settings.max_concurrent_llm_requests)
+            self._semaphore_loop = loop
+        return self._semaphore
 
     @_LLM_RETRY
     async def _call_gemini(self, prompt: str, schema_json: str) -> str:
-        """Tier 1: Google Gemini 2.0 Flash."""
+        """Tier 1: Google Gemini Flash."""
         if not settings.gemini_api_key:
             raise LLMTransientError("Gemini API key is not configured.")
         try:
             import google.generativeai as genai
             genai.configure(api_key=settings.gemini_api_key)
-            model = genai.GenerativeModel("gemini-2.0-flash", generation_config={"response_mime_type": "application/json"})
-            response = await model.generate_content_async(f"{prompt}\n\nStrict JSON schema:\n{schema_json}")
+            model = genai.GenerativeModel(
+                settings.gemini_model,
+                generation_config={"response_mime_type": "application/json"},
+            )
+            response = await model.generate_content_async(
+                f"{prompt}\n\nStrict JSON schema:\n{schema_json}"
+            )
             return response.text
         except Exception as exc:
-            if "429" in str(exc).lower() or "quota" in str(exc).lower():
+            err_msg = str(exc).lower()
+            if "429" in err_msg or "quota" in err_msg:
                 raise LLMRateLimitError(str(exc)) from exc
             raise LLMTransientError(str(exc)) from exc
 
     @_LLM_RETRY
-    async def _call_openai_compat(self, api_key: Optional[str], base_url: Optional[str], model: str, prompt: str, schema_json: str) -> str:
+    async def _call_openai_compat(
+        self,
+        api_key: Optional[str],
+        base_url: Optional[str],
+        model: str,
+        prompt: str,
+        schema_json: str,
+    ) -> str:
         """Helper for OpenAI-compatible providers with client connection pooling."""
         if not api_key:
             raise LLMTransientError(f"{model} API key is not configured.")
@@ -74,66 +128,138 @@ class MultiTierLLMEngine:
             completion = await client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": f"Extract structured data as valid JSON matching schema:\n{schema_json}"},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system",
+                        "content": f"Extract structured data as valid JSON matching schema:\n{schema_json}",
+                    },
+                    {"role": "user", "content": prompt},
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.1,
             )
             return completion.choices[0].message.content or "{}"
         except Exception as exc:
-            if "429" in str(exc).lower():
+            err_msg = str(exc).lower()
+            if "429" in err_msg:
                 raise LLMRateLimitError(str(exc)) from exc
             raise LLMTransientError(str(exc)) from exc
 
     def _deterministic_extract(self, raw_text: str, schema_cls: Type[BaseModel]) -> Dict[str, Any]:
         """Tier 4: Zero-API rule-based regex and heuristic extractor."""
-        logger.info(f"Using Tier 4 deterministic extractor for {schema_cls.__name__}")
+        logger.debug(f"Executing Tier 4 deterministic extractor for {schema_cls.__name__}")
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
         first_line = lines[0] if lines else "Untitled"
+        t_upper = raw_text.upper()
         data: Dict[str, Any] = {}
 
+        # 1. Summary field (NewsSummarySchema / NewsContent)
+        if "summary" in schema_cls.model_fields:
+            # Extract first 2-3 sentences as factual deterministic lead
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw_text) if len(s.strip()) > 15]
+            lead_summary = " ".join(sentences[:3]) if sentences else (lines[1] if len(lines) > 1 else first_line)
+            data["summary"] = lead_summary[:500] if lead_summary else None
+
+        # 2. Remote boolean field (JobExtractionSchema)
+        if "is_remote" in schema_cls.model_fields:
+            remote_signals = ("REMOTE", "WORK FROM HOME", "ANYWHERE", "TELECOMMUTE", "WORLDWIDE")
+            data["is_remote"] = any(sig in t_upper for sig in remote_signals)
+
+        # 3. Role family field (JobExtractionSchema)
+        if "role_family" in schema_cls.model_fields:
+            role = RoleFamilyEnum.OTHER
+            if re.search(r"research|scientist|phd", raw_text, re.I):
+                role = RoleFamilyEnum.RESEARCH
+            elif re.search(r"engineer|developer|architect|programmer|mlops|backend", raw_text, re.I):
+                role = RoleFamilyEnum.ENGINEERING
+            elif re.search(r"product|pm\b", raw_text, re.I):
+                role = RoleFamilyEnum.PRODUCT
+            elif re.search(r"design|ui|ux", raw_text, re.I):
+                role = RoleFamilyEnum.DESIGN
+            elif re.search(r"sales|bdr|sdr|account exec", raw_text, re.I):
+                role = RoleFamilyEnum.SALES
+            elif re.search(r"marketing|growth", raw_text, re.I):
+                role = RoleFamilyEnum.MARKETING
+            elif re.search(r"operations|ops|chief of staff", raw_text, re.I):
+                role = RoleFamilyEnum.OPERATIONS
+            data["role_family"] = role
+
+        # 4. Pricing model field (ProductPricingSchema)
+        if "pricingModel" in schema_cls.model_fields:
+            if any(w in t_upper for w in ("ENTERPRISE", "CONTACT SALES", "REQUEST DEMO", "CUSTOM PRICING")):
+                data["pricingModel"] = PricingModelEnum.ENTERPRISE
+            elif any(w in t_upper for w in ("$", "/MO", "/MONTH", "SUBSCRIPTION", "PER TOKEN", "PAY-AS-YOU-GO", "PAY AS YOU GO")):
+                data["pricingModel"] = PricingModelEnum.PAID
+            elif any(w in t_upper for w in ("OPEN SOURCE", "OPEN-SOURCE", "100% FREE", "FREE TOOL", "COMPLETELY FREE", "MIT LICENSE", "APACHE 2")):
+                data["pricingModel"] = PricingModelEnum.FREE
+            elif any(w in t_upper for w in ("FREEMIUM", "FREE TIER", "FREE TRIAL", "FREE PLAN", "FREE VERSION")):
+                data["pricingModel"] = PricingModelEnum.FREEMIUM
+            elif "GITHUB.COM" in t_upper or "HUGGINGFACE.CO" in t_upper:
+                data["pricingModel"] = PricingModelEnum.FREE
+            elif any(w in t_upper for w in ("API", "INFRASTRUCTURE", "HOSTED PLATFORM", "CLOUD SERVICE")):
+                data["pricingModel"] = PricingModelEnum.PAID
+            else:
+                data["pricingModel"] = PricingModelEnum.FREEMIUM
+
+        # Standard entity fields fallback
         if "title" in schema_cls.model_fields:
             data["title"] = first_line[:200]
         if "full_text" in schema_cls.model_fields:
             data["full_text"] = raw_text[:5000]
-        if "summary" in schema_cls.model_fields:
-            data["summary"] = (lines[1] if len(lines) > 1 else first_line)[:500]
+
         return data
 
     async def extract_structured(
         self,
         raw_text: str,
-        schema_cls: Type[BaseModel],
-        instruction: str = "Extract entity details from content:",
-    ) -> BaseModel:
-        """Execute extraction across fallback tiers: Gemini -> Groq -> DeepSeek -> Deterministic."""
-        budgeted_text = chunk_to_budget(raw_text)
-        schema_json = json.dumps(schema_cls.model_json_schema(), indent=2)
-        full_prompt = f"{instruction}\n\nCONTENT:\n{budgeted_text}"
+        schema_cls: Type[T],
+        instruction: str = "Extract structured data from content:",
+    ) -> T:
+        """
+        Execute structured extraction across multi-tier fallback:
+        Gemini -> Groq -> Custom Third-Party Gateway -> Deterministic Heuristics.
+        Guarantees bounded concurrency via internal semaphore.
+        """
+        async with self._get_semaphore():
+            budgeted_text = chunk_to_budget(raw_text)
+            schema_json = json.dumps(schema_cls.model_json_schema(), indent=2)
+            full_prompt = f"{instruction}\n\nCONTENT:\n{budgeted_text}"
 
-        tiers = [
-            ("Gemini Flash", lambda: self._call_gemini(full_prompt, schema_json)),
-            ("Groq Llama 3.3", lambda: self._call_openai_compat(
-                settings.groq_api_key, "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", full_prompt, schema_json
-            )),
-            ("DeepSeek Chat", lambda: self._call_openai_compat(
-                settings.deepseek_api_key, "https://api.deepseek.com", "deepseek-chat", full_prompt, schema_json
-            )),
-        ]
+            tiers = [
+                ("Tier 1 (Gemini)", lambda: self._call_gemini(full_prompt, schema_json)),
+                ("Tier 2 (Groq Secondary)", lambda: self._call_openai_compat(
+                    settings.groq_api_key,
+                    settings.groq_base_url,
+                    settings.groq_model,
+                    full_prompt,
+                    schema_json,
+                )),
+                ("Tier 3 (Custom Gateway)", lambda: self._call_openai_compat(
+                    settings.effective_tier3_api_key,
+                    settings.effective_tier3_base_url,
+                    settings.effective_tier3_model,
+                    full_prompt,
+                    schema_json,
+                )),
+            ]
 
-        for provider_name, call_fn in tiers:
+            for provider_name, call_fn in tiers:
+                try:
+                    res_text = await call_fn()
+                    cleaned_json = _clean_json_markdown(res_text)
+                    parsed = json.loads(cleaned_json)
+                    return schema_cls.model_validate(parsed)
+                except Exception as exc:
+                    logger.debug(f"{provider_name} fallback: {exc}. Trying next tier...")
+
+            # Tier 4: Zero-API Deterministic Heuristics
             try:
-                res_text = await call_fn()
-                return schema_cls.model_validate(json.loads(res_text))
-            except Exception as exc:
-                logger.warning(f"Tier ({provider_name}) failed: {exc}. Trying next tier...")
-
-        # Final Tier: Deterministic Heuristics
-        try:
-            return schema_cls.model_validate(self._deterministic_extract(budgeted_text, schema_cls))
-        except ValidationError as val_err:
-            raise ExtractionFailureError(f"All extraction tiers failed for {schema_cls.__name__}") from val_err
+                det_data = self._deterministic_extract(budgeted_text, schema_cls)
+                return schema_cls.model_validate(det_data)
+            except ValidationError as val_err:
+                raise ExtractionFailureError(
+                    f"All extraction tiers failed for {schema_cls.__name__}"
+                ) from val_err
 
 
+# Global singleton instance
 llm_engine = MultiTierLLMEngine()

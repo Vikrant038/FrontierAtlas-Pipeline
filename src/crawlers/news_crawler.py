@@ -8,6 +8,8 @@ from rapidfuzz import fuzz, process
 
 from src.crawlers.base import AsyncBaseCrawler
 from src.llm.chunker import clean_html_text
+from src.llm.fallback_chain import llm_engine
+from src.llm.prompts import NewsSummarySchema, NEWS_SUMMARY_PROMPT
 from src.schemas.entities import NewsContent, NewsRecord, SourceMetadata
 from src.utils.date_normalizer import extract_date_from_html, infer_content_freshness
 from src.utils.run_state import load_seen_keys, save_seen_keys
@@ -109,22 +111,33 @@ class NewsCrawler(AsyncBaseCrawler):
 
         # Freshness gate: strict feed date, then HTML metadata, then text inference,
         # then cross-run novelty (unseen since last run = new; previously seen = old).
-        pub_date = self.check_freshness(getattr(entry, "published", None) or getattr(entry, "updated", None))
+        raw_feed_date = getattr(entry, "published", None) or getattr(entry, "updated", None)
+        pub_date = self.check_freshness(raw_feed_date)
+        has_source_date = raw_feed_date is not None and str(raw_feed_date).strip() != ""
         date_inferred = False
         if not pub_date:
-            pub_date = self.check_freshness(extract_date_from_html(raw_html, page_url=link))
+            html_date = extract_date_from_html(raw_html, page_url=link)
+            has_source_date = has_source_date or html_date is not None
+            pub_date = self.check_freshness(html_date)
             date_inferred = pub_date is not None
         if not pub_date and full_text:
             pub_date = self.check_freshness(infer_content_freshness(full_text))
             date_inferred = pub_date is not None
         if not pub_date:
-            if norm_url in self._prev_run_urls:
-                # Seen in a previous run and no fresh-date signal: not new, reject.
+            if has_source_date:
+                # Source stated a date but it failed the 24h gate (all heuristics missed):
+                # strictly stale - novelty stamping must not override a real date.
                 self._seen_urls.discard(norm_url)
                 if norm_title in self._seen_titles:
                     self._seen_titles.remove(norm_title)
                 return None
-            # Never seen before: treat as new since last run, stamp collection time.
+            if norm_url in self._prev_run_urls:
+                # Truly dateless, seen in a previous run: not new, reject.
+                self._seen_urls.discard(norm_url)
+                if norm_title in self._seen_titles:
+                    self._seen_titles.remove(norm_title)
+                return None
+            # Truly dateless, never seen before: treat as new since last run.
             pub_date = datetime.now(timezone.utc)
             date_inferred = True
             logger.debug(f"Dateless entry treated as new-since-last-run: '{title}' ({source_name}).")
@@ -136,7 +149,20 @@ class NewsCrawler(AsyncBaseCrawler):
             if is_full_text:
                 self.stats[source_name]["full_text"] += 1
 
+        # Prefer high-fidelity factual LLM summary when full text is available; fall back to RSS summary
         summary = getattr(entry, "summary", "") or (full_text[:300] if full_text else title)
+        if is_full_text and full_text:
+            try:
+                llm_out = await llm_engine.extract_structured(
+                    raw_text=full_text,
+                    schema_cls=NewsSummarySchema,
+                    instruction=NEWS_SUMMARY_PROMPT,
+                )
+                if llm_out.summary and len(llm_out.summary.strip()) >= 20:
+                    summary = llm_out.summary.strip()
+            except Exception as exc:
+                logger.debug(f"LLM summary extraction fallback for '{title}': {exc}")
+
         return NewsRecord(
             source=SourceMetadata(name=source_name, url=link),
             content=NewsContent(title=title, published_date=pub_date, summary=summary[:500] if summary else None, full_text=full_text or summary or title),

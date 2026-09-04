@@ -266,3 +266,32 @@ async def test_news_crawler_full_text_fallback_quality():
     assert len(articles[0].content.full_text) >= 20
     assert crawler.stats["Paywalled Feed"]["total"] == 1
     assert crawler.stats["Paywalled Feed"]["full_text"] == 0
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+@respx.mock
+async def test_news_crawler_stale_feed_date_rejected_not_novelty_stamped():
+    # Arrange - feed states a date weeks old; all heuristics miss; novelty must NOT rescue.
+    rss_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Stale Feed</title>
+<item>
+  <title>Month Old Story Without Metadata</title>
+  <link>https://example.com/month-old-story</link>
+  <pubDate>Tue, 11 Aug 2026 10:00:00 GMT</pubDate>
+  <description>An old story with plain description text lacking any relative recency phrases.</description>
+</item>
+</channel></rss>"""
+    crawler = NewsCrawler(sources=[{"name": "Stale Feed", "feed_url": "https://example.com/stale.xml"}])
+    respx.get("https://example.com/stale.xml").mock(return_value=httpx.Response(200, text=rss_xml))
+    # Article body with no date metadata and no freshness phrases
+    respx.get("https://example.com/month-old-story").mock(
+        return_value=httpx.Response(200, text="<html><body><p>Plain archived content paragraph with sufficient length for the schema validation requirements.</p></body></html>")
+    )
+
+    # Act
+    articles = await crawler.crawl()
+    await crawler.close()
+
+    # Assert - stale source date strictly rejected, novelty stamp must not override
+    assert articles == []

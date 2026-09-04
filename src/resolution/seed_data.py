@@ -13,7 +13,9 @@ CANONICAL_AI_ENTITIES: List[str] = [
     "xAI", "DeepSeek", "Inflection AI", "Runway", "Pika Labs", "Suno", "Udio",
     "Notion AI", "Jasper AI", "Copy AI", "Writer AI", "Harvey AI", "Clio", "Ironclad",
     "Adept AI", "Imbue", "Weights & Biases", "Replicate", "Modal", "Banana Dev",
-    "Cerebras", "SambaNova", "Tenstorrent", "Graphcore", "Mythic AI"
+    "Cerebras", "SambaNova", "Tenstorrent", "Graphcore", "Mythic AI",
+    "Alibaba AI", "Moonshot AI", "Zhipu AI", "MiniMax AI", "LMSYS", "GitHub",
+    "Salesforce AI", "NVIDIA", "Apple AI", "Tencent AI", "Baidu AI"
 ]
 
 CORPORATE_SUFFIXES: Set[str] = {
@@ -51,4 +53,26 @@ KNOWN_ALIASES: Dict[str, str] = {
     "pika": "Pika Labs",
     "wandb": "Weights & Biases",
     "weights and biases": "Weights & Biases",
+    "facebook": "Meta AI",
+    "meta": "Meta AI",
+    "grok": "xAI",
+    "qwen": "Alibaba AI",
+    "minimax": "MiniMax AI",
+    "kimi": "Moonshot AI",
+    "kimi k2": "Moonshot AI",
+    "glm": "Zhipu AI",
+    "chatglm": "Zhipu AI",
+    "vicuna": "LMSYS",
+    "vicuna 13b": "LMSYS",
+    "vicuna-13b": "LMSYS",
+    "llama": "Meta AI",
+    "llama 2": "Meta AI",
+    "llama 3": "Meta AI",
+    "bing search": "Microsoft AI",
+    "github copilot": "GitHub",
+    "claude": "Anthropic",
+    "chatgpt": "OpenAI",
+    "gpt 4": "OpenAI",
+    "gemini": "Google DeepMind",
+    "bard": "Google DeepMind",
 }

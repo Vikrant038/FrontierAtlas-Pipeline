@@ -3,6 +3,8 @@ Unit tests for JobsCrawler freshness filtering, role classification, and multi-s
 Follows AAA pattern with offline respx mocking and freezegun per CODING_STANDARDS.md.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 import respx
 import httpx
@@ -172,3 +174,70 @@ async def test_jobs_crawler_arbeitnow_ingestion():
 
     assert jobs[1].content.title == "Staff AI Engineer - 2nd Horizon | Germany | Remote"
     assert jobs[1].content.is_remote is True
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+@respx.mock
+async def test_jobs_crawler_stale_source_date_rejected_not_novelty_stamped():
+    # Arrange - RemoteOK defect regression: item with real but stale date must be
+    # rejected outright, never rescued by the cross-run novelty stamp.
+    crawler = JobsCrawler()
+    stale_iso = "2026-08-11T12:28:07+00:00"  # weeks old, source-stated
+
+    stale_data = [
+        {
+            "company": "OldCo",
+            "position": "Machine Learning Engineer",
+            "date": stale_iso,
+            "url": "https://remoteok.com/jobs/stale-ml",
+            "tags": ["ml"],
+            "location": "",
+            "id": 1,
+        }
+    ]
+    respx.get("https://remoteok.com/api?tag=ai").mock(
+        return_value=httpx.Response(200, json=[{"legal": "notice"}] + stale_data)
+    )
+
+    # Act
+    jobs = await crawler.fetch_remoteok()
+    await crawler.close()
+
+    # Assert - stale source date wins over novelty: zero records
+    assert jobs == []
+
+
+@freeze_time("2026-09-04T12:00:00Z")
+@pytest.mark.asyncio
+@respx.mock
+async def test_jobs_crawler_dateless_new_posting_novelty_stamped_once():
+    # Arrange - truly dateless posting: novelty stamp on first run, rejected on second.
+    crawler = JobsCrawler()
+    dateless_data = [
+        {
+            "company": "NewCo",
+            "position": "LLM Research Engineer",
+            "date": "",
+            "url": "https://remoteok.com/jobs/dateless-llm",
+            "tags": [],
+            "location": "",
+            "id": 2,
+        }
+    ]
+    respx.get("https://remoteok.com/api?tag=ai").mock(
+        return_value=httpx.Response(200, json=[{"legal": "notice"}] + dateless_data)
+    )
+
+    # Act - first run: dateless + unseen = collect with collection-time stamp
+    jobs_first = await crawler.fetch_remoteok()
+
+    # Act - second run: same dateless posting now in prev-run state = reject
+    crawler._prev_run_urls = {"" .join(["https://remoteok.com/jobs/dateless-llm"])}
+    jobs_second = await crawler.fetch_remoteok()
+    await crawler.close()
+
+    # Assert
+    assert len(jobs_first) == 1
+    assert jobs_first[0].content.date == datetime(2026, 9, 4, 12, 0, 0, tzinfo=timezone.utc)
+    assert jobs_second == []
