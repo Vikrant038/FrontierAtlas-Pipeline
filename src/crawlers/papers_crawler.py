@@ -25,6 +25,13 @@ class ResearchPapersCrawler(TargetedCrawler):
     ARXIV_API_BASE = "https://export.arxiv.org/api/query"
     ARXIV_INTERVAL_SECONDS = 3.2  # Strict 1 req / 3s ArXiv policy enforcement
     CDN_CATEGORIES = ["cs.AI", "cs.LG", "cs.CV", "cs.CL", "cs.NE"]
+    ARXIV_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/atom+xml,application/xml,text/xml,*/*",
+    }
 
     def __init__(self, target_count: int = 1000, **kwargs):
         super().__init__(target_count=target_count, **kwargs)
@@ -122,7 +129,12 @@ class ResearchPapersCrawler(TargetedCrawler):
             "sortBy": "submittedDate",
             "sortOrder": "descending",
         }
-        content = await self.fetch(self.ARXIV_API_BASE, params=params)
+        content = await self.fetch(
+            self.ARXIV_API_BASE,
+            params=params,
+            headers=self.ARXIV_HEADERS,
+            timeout=30.0,
+        )
         feed = feedparser.parse(content)
         return self._filter_new_papers(getattr(feed, "entries", []), limit)
 
@@ -136,20 +148,93 @@ class ResearchPapersCrawler(TargetedCrawler):
                 entries = await self.fetch_feed(f"https://rss.arxiv.org/rss/{cat}")
                 results.extend(self._filter_new_papers(entries, limit - len(results)))
             except Exception as exc:
-                logger.warning(f"Arxiv CDN RSS failed for {cat}: {exc}")
+                logger.warning(f"Arxiv CDN RSS failed for {cat}: {repr(exc)}")
         return results
 
+    async def _query_hf_papers(self, limit: int) -> List[Dict[str, Any]]:
+        """Harvest fresh papers from Hugging Face Daily Papers API with verified code repos."""
+        try:
+            items = await self.fetch_json("https://huggingface.co/api/daily_papers?limit=100")
+            papers: List[Dict[str, Any]] = []
+            for item in (items or []):
+                p = item.get("paper", {})
+                title = p.get("title", "").strip()
+                arxiv_id = p.get("id", "")
+                pub_date = parse_datetime_to_utc(p.get("publishedAt"))
+                if not title or not pub_date:
+                    continue
+                paper_url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else ""
+                if not paper_url or self.is_seen(paper_url):
+                    continue
+                repo_raw = p.get("githubRepo") or ""
+                m = GITHUB_URL_PATTERN.search(repo_raw) if repo_raw else None
+                papers.append({
+                    "title": title,
+                    "authors": [a.get("name") for a in p.get("authors", []) if a.get("name")] or ["HF AI Researcher"],
+                    "paper_url": paper_url,
+                    "published_date": pub_date,
+                    "abstract_repo": m.group(1) if m else None,
+                })
+                if len(papers) >= limit:
+                    break
+            return papers
+        except Exception as exc:
+            logger.warning(f"HF daily papers error: {repr(exc)}")
+            return []
+
+    async def _query_openalex_papers(self, page: int, limit: int) -> List[Dict[str, Any]]:
+        """Harvest authentic arXiv papers via OpenAlex academic mirror with high throughput."""
+        params = {
+            "filter": "primary_location.source.id:S4306400194,concepts.id:C154945302",
+            "sort": "publication_date:desc",
+            "per-page": min(100, limit),
+            "page": page,
+        }
+        try:
+            data = await self.fetch_json("https://api.openalex.org/works", params=params)
+            papers: List[Dict[str, Any]] = []
+            for w in (data or {}).get("results", []):
+                title = (w.get("title") or "").strip()
+                loc = (w.get("primary_location") or {}).get("landing_page_url") or w.get("doi") or ""
+                pub_date = parse_datetime_to_utc(w.get("publication_date"))
+                if not title or not loc or not pub_date or self.is_seen(loc):
+                    continue
+                authors = [a.get("author", {}).get("display_name") for a in w.get("authorships", []) if a.get("author", {}).get("display_name")] or ["AI Researcher"]
+                gh_match = GITHUB_URL_PATTERN.search(f"{title} {loc}")
+                papers.append({
+                    "title": title,
+                    "authors": authors,
+                    "paper_url": loc,
+                    "published_date": pub_date,
+                    "abstract_repo": gh_match.group(1) if gh_match else None,
+                })
+                if len(papers) >= limit:
+                    break
+            return papers
+        except Exception as exc:
+            logger.warning(f"OpenAlex arXiv mirror error: {repr(exc)}")
+            return []
+
     async def fetch_papers_batch(self, start: int, limit: int) -> List[Dict[str, Any]]:
-        """Fetch papers from official ArXiv with automatic fallback to CDN RSS on true outage."""
+        """Fetch papers with automatic multi-tier failover (Arxiv API -> CDN RSS -> HF -> OpenAlex)."""
         if not self._use_cdn:
             try:
                 papers = await self._query_arxiv_api(start, limit)
                 if papers:
                     return papers
             except Exception as exc:
-                logger.warning(f"Arxiv API persistent outage ({exc}). Switching to CDN RSS failover.")
+                logger.warning(f"Arxiv API persistent outage ({repr(exc)}). Switching to CDN RSS failover.")
                 self._use_cdn = True
-        return await self._query_arxiv_cdn(limit)
+
+        cdn_papers = await self._query_arxiv_cdn(limit)
+        if len(cdn_papers) < limit:
+            hf_papers = await self._query_hf_papers(limit - len(cdn_papers))
+            cdn_papers.extend(hf_papers)
+        if len(cdn_papers) < limit:
+            page = (start // 100) + 1
+            alex_papers = await self._query_openalex_papers(page, limit - len(cdn_papers))
+            cdn_papers.extend(alex_papers)
+        return cdn_papers
 
     async def fetch_arxiv_batch(self, start: int = 0, max_results: int = 100) -> List[Dict[str, Any]]:
         """Public alias for backward compatibility."""

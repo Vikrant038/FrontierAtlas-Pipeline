@@ -109,15 +109,17 @@ class AsyncBaseCrawler(ABC):
         url: str,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Core HTTP request with SSRF validation, semaphore bounds, and retry backoff."""
         safe_url = validate_url_safe(url)
         client = await self.get_client()
         req_headers = {**self.headers, **(headers or {})}
+        req_timeout = timeout if timeout is not None else self.timeout
 
         async with self.semaphore:
             try:
-                resp = await client.get(safe_url, params=params, headers=req_headers)
+                resp = await client.get(safe_url, params=params, headers=req_headers, timeout=req_timeout)
                 if resp.status_code in (429, 500, 502, 503, 504):
                     if resp.status_code == 429:
                         await _handle_retry_after(resp.headers, safe_url)
@@ -125,20 +127,27 @@ class AsyncBaseCrawler(ABC):
                 resp.raise_for_status()
                 return resp
             except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError) as net_err:
-                raise TransientNetworkError(str(net_err)) from net_err
+                raise TransientNetworkError(repr(net_err)) from net_err
 
-    async def fetch(self, url: str, params: Optional[Dict[str, Any]] = None) -> str:
+    async def fetch(
+        self,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
         """Fetch URL content as text string."""
-        return (await self._request(url, params=params)).text
+        return (await self._request(url, params=params, headers=headers, timeout=timeout)).text
 
     async def fetch_json(
         self,
         url: str,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
         """Fetch URL and return parsed JSON."""
-        return (await self._request(url, params=params, headers=headers)).json()
+        return (await self._request(url, params=params, headers=headers, timeout=timeout)).json()
 
     @_CRAWLER_RETRY
     async def fetch_tls(self, url: str) -> str:

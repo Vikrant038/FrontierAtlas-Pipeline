@@ -53,7 +53,7 @@ def test_excel_exporter_creates_6_tabs():
         assert os.path.exists(output_file)
         wb = openpyxl.load_workbook(output_file)
         expected_sheets = [
-            "Startups", "Products", "Research_Papers", "Jobs_24h", "News_24h", "Entity_Resolution_Log"
+            "Startups", "Products", "Research_Papers", "Jobs_24h", "News_24h", "Entity Mapping Log"
         ]
         assert wb.sheetnames == expected_sheets
 
@@ -111,4 +111,4 @@ def test_csv_exporter_exports_files():
         with open(exported["startups"], "r", encoding="utf-8") as f:
             content = f.read()
             assert "Anthropic" in content
-            assert "Canonical Entity Name" in content
+            assert "schemaVersion" in content

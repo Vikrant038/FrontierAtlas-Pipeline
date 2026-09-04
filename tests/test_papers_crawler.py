@@ -153,3 +153,60 @@ async def test_crawler_retry_on_429_with_retry_after():
     # Assert
     assert content == "Success"
     assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_hf_daily_papers_failover():
+    # Arrange
+    crawler = ResearchPapersCrawler(target_count=1)
+    hf_data = [{
+        "paper": {
+            "title": "HF Paper on Transformers",
+            "id": "2609.99998",
+            "publishedAt": "2026-09-03T12:00:00Z",
+            "authors": [{"name": "HF Scientist"}],
+            "githubRepo": "https://github.com/huggingface/transformers",
+        }
+    }]
+    respx.get("https://huggingface.co/api/daily_papers?limit=100").mock(
+        return_value=httpx.Response(200, json=hf_data)
+    )
+
+    # Act
+    papers = await crawler._query_hf_papers(limit=1)
+    await crawler.close()
+
+    # Assert
+    assert len(papers) == 1
+    assert papers[0]["title"] == "HF Paper on Transformers"
+    assert papers[0]["paper_url"] == "https://arxiv.org/abs/2609.99998"
+    assert papers[0]["abstract_repo"] == "huggingface/transformers"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openalex_papers_failover():
+    # Arrange
+    crawler = ResearchPapersCrawler(target_count=1)
+    alex_data = {
+        "results": [{
+            "title": "OpenAlex AI Study",
+            "primary_location": {"landing_page_url": "https://arxiv.org/abs/2609.99997"},
+            "publication_date": "2026-09-03",
+            "authorships": [{"author": {"display_name": "Dr. Alex"}}],
+        }]
+    }
+    respx.get("https://api.openalex.org/works").mock(
+        return_value=httpx.Response(200, json=alex_data)
+    )
+
+    # Act
+    papers = await crawler._query_openalex_papers(page=1, limit=1)
+    await crawler.close()
+
+    # Assert
+    assert len(papers) == 1
+    assert papers[0]["title"] == "OpenAlex AI Study"
+    assert papers[0]["paper_url"] == "https://arxiv.org/abs/2609.99997"
+    assert papers[0]["authors"] == ["Dr. Alex"]
