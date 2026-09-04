@@ -3,6 +3,7 @@ Unit tests for MultiTierLLMEngine fallback chain and zero-record-loss resilience
 Follows AAA pattern per CODING_STANDARDS.md.
 """
 
+import asyncio
 from unittest.mock import AsyncMock
 import pytest
 from freezegun import freeze_time
@@ -165,3 +166,59 @@ async def test_crawler_resilience_zero_dropped_records_on_llm_failure(monkeypatc
     assert news_rec is not None
     assert news_rec.content.title == "AI Breakthrough"
     assert "RSS fallback summary text" in news_rec.content.summary
+
+
+@pytest.mark.asyncio
+async def test_provider_rate_limiter_pacing(monkeypatch):
+    # Arrange: rate limiter with limit = 2
+    import time
+    from src.llm.rate_limiter import ProviderRateLimiter
+    limiter = ProviderRateLimiter(rpm_limits={"test": 2})
+    slept_durations = []
+    fake_now = 1000.0
+
+    def mock_monotonic():
+        nonlocal fake_now
+        return fake_now
+
+    async def mock_sleep(d):
+        nonlocal fake_now
+        slept_durations.append(d)
+        fake_now += d + 1.0
+
+    monkeypatch.setattr(time, "monotonic", mock_monotonic)
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    # Act
+    t1 = await limiter.acquire("test")
+    t2 = await limiter.acquire("test")
+    t3 = await limiter.acquire("test")
+
+    # Assert: first two calls did not sleep, third call triggered pacing sleep
+    assert t1 == 0.0
+    assert t2 == 0.0
+    assert len(slept_durations) == 1
+    assert slept_durations[0] > 0.0
+
+
+@pytest.mark.no_auto_mock_llm
+@pytest.mark.asyncio
+async def test_llm_engine_schema_invalid_output_falls_over_to_tier2(monkeypatch):
+    # Arrange: Tier 1 returns invalid payload (invalid enum value)
+    engine = MultiTierLLMEngine()
+    mock_gemini = AsyncMock(return_value='{"pricingModel": "NOT_A_VALID_ENUM"}')
+    mock_groq = AsyncMock(return_value='{"pricingModel": "FREE"}')
+    monkeypatch.setattr(engine, "_call_gemini", mock_gemini)
+    monkeypatch.setattr(engine, "_call_openai_compat", mock_groq)
+
+    # Act
+    res = await engine.extract_structured(
+        raw_text="Product Name: Tool\nDescription: Completely free open source",
+        schema_cls=ProductPricingSchema,
+        instruction=PRODUCT_PRICING_PROMPT,
+    )
+
+    # Assert: Tier 1 schema failure triggered failover to Tier 2 without crashing
+    assert res.pricingModel == PricingModelEnum.FREE
+    mock_gemini.assert_awaited_once()
+    mock_groq.assert_awaited_once()

@@ -28,6 +28,7 @@ from tenacity import (
 
 from src.config import settings
 from src.llm.chunker import chunk_to_budget
+from src.llm.rate_limiter import rate_limiter
 from src.schemas.entities import PricingModelEnum, RoleFamilyEnum
 from src.utils.logger import logger
 
@@ -86,23 +87,28 @@ class MultiTierLLMEngine:
 
     @_LLM_RETRY
     async def _call_gemini(self, prompt: str, schema_json: str) -> str:
-        """Tier 1: Google Gemini Flash."""
+        """Tier 1: Google Gemini Flash using official modern google-genai SDK."""
         if not settings.gemini_api_key:
             raise LLMTransientError("Gemini API key is not configured.")
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=settings.gemini_api_key)
-            model = genai.GenerativeModel(
-                settings.gemini_model,
-                generation_config={"response_mime_type": "application/json"},
+            if "gemini" not in self._clients:
+                from google import genai
+                self._clients["gemini"] = genai.Client(api_key=settings.gemini_api_key)
+            client = self._clients["gemini"]
+            from google.genai import types
+
+            response = await client.aio.models.generate_content(
+                model=settings.gemini_model,
+                contents=f"{prompt}\n\nStrict JSON schema:\n{schema_json}",
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                ),
             )
-            response = await model.generate_content_async(
-                f"{prompt}\n\nStrict JSON schema:\n{schema_json}"
-            )
-            return response.text
+            return response.text or "{}"
         except Exception as exc:
             err_msg = str(exc).lower()
-            if "429" in err_msg or "quota" in err_msg:
+            if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg:
                 raise LLMRateLimitError(str(exc)) from exc
             raise LLMTransientError(str(exc)) from exc
 
@@ -225,15 +231,15 @@ class MultiTierLLMEngine:
             full_prompt = f"{instruction}\n\nCONTENT:\n{budgeted_text}"
 
             tiers = [
-                ("Tier 1 (Gemini)", lambda: self._call_gemini(full_prompt, schema_json)),
-                ("Tier 2 (Groq Secondary)", lambda: self._call_openai_compat(
+                ("Tier 1 (Gemini)", "gemini", lambda: self._call_gemini(full_prompt, schema_json)),
+                ("Tier 2 (Groq Secondary)", "groq", lambda: self._call_openai_compat(
                     settings.groq_api_key,
                     settings.groq_base_url,
                     settings.groq_model,
                     full_prompt,
                     schema_json,
                 )),
-                ("Tier 3 (Custom Gateway)", lambda: self._call_openai_compat(
+                ("Tier 3 (Custom Gateway)", "custom", lambda: self._call_openai_compat(
                     settings.effective_tier3_api_key,
                     settings.effective_tier3_base_url,
                     settings.effective_tier3_model,
@@ -242,8 +248,9 @@ class MultiTierLLMEngine:
                 )),
             ]
 
-            for provider_name, call_fn in tiers:
+            for provider_name, provider_id, call_fn in tiers:
                 try:
+                    await rate_limiter.acquire(provider_id)
                     res_text = await call_fn()
                     cleaned_json = _clean_json_markdown(res_text)
                     parsed = json.loads(cleaned_json)

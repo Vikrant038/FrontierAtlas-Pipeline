@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # API Keys & LLM Provider Settings
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini-3.6-flash"
+    gemini_model: str = "gemini-3.5-flash-lite"
     
     # Tier 2: Groq / Secondary OpenAI-Compatible
     groq_api_key: Optional[str] = None
@@ -35,8 +35,11 @@ class Settings(BaseSettings):
     # GitHub API Token (for live repository star metrics)
     github_token: Optional[str] = None
 
-    # LLM Operational Concurrency
+    # LLM Operational Concurrency & Provider Rate Limits
     max_concurrent_llm_requests: int = 5
+    gemini_rpm: int = 15
+    groq_rpm: int = 30
+    custom_llm_rpm: int = 60
 
     @property
     def effective_tier3_api_key(self) -> Optional[str]:
