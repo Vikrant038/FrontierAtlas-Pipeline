@@ -63,6 +63,7 @@ class Settings(BaseSettings):
 
     # Telemetry & Output
     log_level: str = "INFO"
+    enable_wal: bool = False
 
     # Google Sheets Deliverable Export (gspread)
     google_service_account_path: Optional[str] = None

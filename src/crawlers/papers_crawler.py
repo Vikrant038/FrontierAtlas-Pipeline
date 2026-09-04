@@ -294,7 +294,9 @@ class ResearchPapersCrawler(TargetedCrawler):
             if not papers:
                 break
             batch = await asyncio.gather(*[self.enrich_paper(p) for p in papers])
-            self.collected.extend(batch)
+            for rec in batch:
+                if rec:
+                    self.add(rec.content.paper_url, rec, already_seen=True)
             offset += len(papers)
             logger.info(
                 f"Papers progress: {len(self.collected)}/{self.target_count} collected"

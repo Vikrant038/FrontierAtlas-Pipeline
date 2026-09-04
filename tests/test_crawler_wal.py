@@ -9,7 +9,15 @@ import pytest
 from pydantic import BaseModel
 
 from src.crawlers.base import TargetedCrawler
-from src.schemas.entities import StartupRecord, SourceMetadata, StartupContent, StartupContentData
+from src.crawlers.papers_crawler import ResearchPapersCrawler
+from src.schemas.entities import (
+    ResearchPaperContent,
+    ResearchPaperRecord,
+    SourceMetadata,
+    StartupContent,
+    StartupContentData,
+    StartupRecord,
+)
 
 
 def test_crawler_wal_append_on_add(tmp_path):
@@ -110,3 +118,39 @@ def test_crawler_wal_skips_corrupt_entries_gracefully(tmp_path):
     assert len(crawler.collected) == 2
     assert crawler.collected[0]["status"] == "ok1"
     assert crawler.collected[1]["status"] == "ok2"
+
+
+@pytest.mark.asyncio
+async def test_papers_crawler_wal_parity(tmp_path):
+    # Arrange
+    wal_file = tmp_path / "papers_wal.jsonl"
+    crawler = ResearchPapersCrawler(target_count=2, wal_path=str(wal_file))
+
+    # Mock paper batch returned by fetch_papers_batch
+    raw_paper = {
+        "title": "Deep Learning Survey",
+        "authors": ["Author One"],
+        "paper_url": "https://arxiv.org/abs/2609.00001",
+        "published_date": "2026-09-03T12:00:00Z",
+        "abstract_repo": None,
+    }
+
+    # Act
+    rec = await crawler.enrich_paper(raw_paper)
+    crawler.add(rec.content.paper_url, rec, already_seen=True)
+    crawler.close_wal()
+
+    # Assert: WAL must contain the serialized ResearchPaperRecord
+    assert wal_file.exists()
+    lines = wal_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["key"] == "https://arxiv.org/abs/2609.00001"
+    assert entry["data"]["content"]["title"] == "Deep Learning Survey"
+
+    # Recovery check
+    crawler2 = ResearchPapersCrawler(target_count=2, wal_path=str(wal_file))
+    recovered = crawler2.recover_from_wal(model_cls=ResearchPaperRecord)
+    assert recovered == 1
+    assert len(crawler2.collected) == 1
+    assert crawler2.collected[0].content.title == "Deep Learning Survey"

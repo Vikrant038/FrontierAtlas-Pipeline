@@ -260,7 +260,9 @@ class TargetedCrawler(AsyncBaseCrawler):
         self.github_token = settings.github_token
         self.seen_keys: set = set()
         self.collected: List[Any] = []
-        self.wal_enabled: bool = wal_enabled or (wal_path is not None)
+        self.wal_enabled: bool = (
+            wal_enabled or getattr(settings, "enable_wal", False) or (wal_path is not None)
+        )
         self.wal_path: Optional[str] = wal_path or (
             str(Path("exports/wal") / f"{self.__class__.__name__.lower()}_wal.jsonl")
             if self.wal_enabled
@@ -337,10 +339,16 @@ class TargetedCrawler(AsyncBaseCrawler):
         except Exception as exc:
             logger.warning(f"WAL write failed for key '{key}': {exc}")
 
-    def add(self, key: Optional[str], item: Any) -> bool:
+    def add(self, key: Optional[str], item: Any, already_seen: bool = False) -> bool:
         """Add item to collected list if not seen and quota not reached. Returns True if full."""
-        if self.is_full or self.is_seen(key):
-            return self.is_full
+        if self.is_full:
+            return True
+        if not already_seen:
+            if self.is_seen(key):
+                return self.is_full
+        else:
+            if key:
+                self.seen_keys.add(key.strip().lower())
         self.collected.append(item)
         if self.wal_enabled:
             self._write_wal(key, item)
