@@ -78,6 +78,9 @@ async def _handle_retry_after(headers: Any, url: str) -> None:
 class AsyncBaseCrawler(ABC):
     """Abstract base class for all asynchronous data crawlers."""
 
+    escalation_attempts: int = 0
+    escalation_successes: int = 0
+
     def __init__(
         self,
         concurrency_limit: Optional[int] = None,
@@ -124,6 +127,7 @@ class AsyncBaseCrawler(ABC):
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
+        allow_retry: bool = True,
     ) -> httpx.Response:
         """Core HTTP request with SSRF validation, semaphore bounds, and retry backoff."""
         safe_url = await asyncio.to_thread(validate_url_safe, url)
@@ -139,10 +143,14 @@ class AsyncBaseCrawler(ABC):
                 if resp.status_code in (429, 500, 502, 503, 504):
                     if resp.status_code == 429:
                         await _handle_retry_after(resp.headers, safe_url)
+                    if not allow_retry:
+                        raise httpx.HTTPStatusError(f"HTTP {resp.status_code}", request=resp.request, response=resp)
                     raise TransientNetworkError(f"HTTP {resp.status_code}")
                 resp.raise_for_status()
                 return resp
             except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError) as net_err:
+                if not allow_retry:
+                    raise net_err
                 raise TransientNetworkError(repr(net_err)) from net_err
 
     async def fetch(
@@ -151,13 +159,23 @@ class AsyncBaseCrawler(ABC):
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
+        allow_tls_fallback: bool = True,
+        allow_retry: bool = True,
     ) -> str:
         """Fetch URL content as text string; escalates to TLS impersonation on 403 anti-bot blocks."""
         try:
-            return (await self._request(url, params=params, headers=headers, timeout=timeout)).text
+            return (await self._request(url, params=params, headers=headers, timeout=timeout, allow_retry=allow_retry)).text
         except BotBlockedError:
+            if not allow_tls_fallback:
+                raise
+            AsyncBaseCrawler.escalation_attempts += 1
             logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
-            return await self.fetch_tls(url, params=params)
+            if timeout is not None:
+                res_text = await self.fetch_tls(url, params=params, timeout=timeout)
+            else:
+                res_text = await self.fetch_tls(url, params=params)
+            AsyncBaseCrawler.escalation_successes += 1
+            return res_text
 
     async def fetch_json(
         self,
@@ -173,18 +191,31 @@ class AsyncBaseCrawler(ABC):
         except BotBlockedError:
             if not allow_tls_fallback:
                 raise
+            AsyncBaseCrawler.escalation_attempts += 1
             logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
-            return json.loads(await self.fetch_tls(url, params=params))
+            if timeout is not None:
+                res_raw = await self.fetch_tls(url, params=params, timeout=timeout)
+            else:
+                res_raw = await self.fetch_tls(url, params=params)
+            AsyncBaseCrawler.escalation_successes += 1
+            return json.loads(res_raw)
+
 
     @_CRAWLER_RETRY
-    async def fetch_tls(self, url: str, params: Optional[Dict[str, Any]] = None) -> str:
+    async def fetch_tls(
+        self,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
         """Fetch using curl-cffi with Chrome124 TLS fingerprint impersonation."""
         safe_url = validate_url_safe(url)
+        req_timeout = int(timeout or self.timeout)
         async with self.semaphore:
             try:
                 async with CurlAsyncSession(impersonate="chrome124") as curl_session:
                     resp = await curl_session.get(
-                        safe_url, params=params, headers=self.headers, timeout=int(self.timeout)
+                        safe_url, params=params, headers=self.headers, timeout=req_timeout
                     )
                     if resp.status_code == 403:
                         raise BotBlockedError(f"curl-cffi HTTP 403 for {safe_url}")
