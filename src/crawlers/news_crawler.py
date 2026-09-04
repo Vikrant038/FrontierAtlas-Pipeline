@@ -8,13 +8,14 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any, Dict, List, Optional, Tuple
 from rapidfuzz import fuzz, process
 
+from src.config import settings
 from src.crawlers.base import AsyncBaseCrawler
 from src.llm.chunker import clean_html_text
 from src.llm.fallback_chain import llm_engine
 from src.llm.prompts import NewsSummarySchema, NEWS_SUMMARY_PROMPT
 from src.schemas.entities import NewsContent, NewsRecord, SourceMetadata
 from src.utils.date_normalizer import extract_date_from_html, infer_content_freshness, parse_datetime_to_utc
-from src.utils.run_state import load_seen_keys, save_seen_keys
+from src.utils.run_state import load_seen_keys, save_seen_keys, save_source_freshness
 from src.utils.logger import logger
 
 NEWS_SOURCES = [
@@ -31,7 +32,7 @@ class NewsCrawler(AsyncBaseCrawler):
 
     def __init__(self, sources: Optional[List[Dict[str, str]]] = None, **kwargs):
         super().__init__(**kwargs)
-        self.sources = sources or NEWS_SOURCES
+        self.sources = sources or self._configured_sources()
         self._seen_urls: set = set()
         self._seen_titles: List[str] = []
         self.stats: Dict[str, Dict[str, int]] = {
@@ -40,6 +41,20 @@ class NewsCrawler(AsyncBaseCrawler):
         # Keys collected in the PREVIOUS run: cross-run novelty heuristic state.
         self._prev_run_urls = load_seen_keys("news")
         self._novelty_keys: set = set()
+
+    @staticmethod
+    def _configured_sources() -> List[Dict[str, str]]:
+        """Resolve news feeds: NEWS_SOURCES_JSON override (list of {name, feed_url}) or built-in NEWS_SOURCES."""
+        override = settings._parse_json_list(settings.news_sources_json, [])
+        if override:
+            normalized = [
+                {"name": s.get("name", ""), "feed_url": s.get("feed_url", "")}
+                for s in override
+                if isinstance(s, dict) and s.get("name") and s.get("feed_url")
+            ]
+            if normalized:
+                return normalized
+        return NEWS_SOURCES
 
     @staticmethod
     def _normalize_url(url: str) -> str:
@@ -150,11 +165,11 @@ class NewsCrawler(AsyncBaseCrawler):
         # For HN we use full_text exclusively (fetched article body or title-fallback — never metadata).
         # Other sources: strip any residual HTML tags from the RSS snippet to keep the field plain-text.
         if source_name == "Hacker News AI":
-            summary = (full_text[:300] if full_text else title)
+            summary = (full_text[:settings.news_summary_preview_len] if full_text else title)
         else:
             rss_summary_raw = getattr(entry, "summary", "") or ""
             rss_summary_clean = clean_html_text(rss_summary_raw) if rss_summary_raw else ""
-            summary = rss_summary_clean or (full_text[:300] if full_text else title)
+            summary = rss_summary_clean or (full_text[:settings.news_summary_preview_len] if full_text else title)
         is_llm_summary = False
         if full_text:
             try:
@@ -248,7 +263,7 @@ class NewsCrawler(AsyncBaseCrawler):
 
         return NewsRecord(
             source=SourceMetadata(name=source_name, url=link),
-            content=NewsContent(title=title, published_date=pub_date, summary=summary[:500] if summary else None, full_text=full_text or summary or title),
+            content=NewsContent(title=title, published_date=pub_date, summary=summary[:settings.news_summary_max_len] if summary else None, full_text=full_text or summary or title),
         )
 
     async def crawl_source(self, src: Dict[str, str]) -> List[NewsRecord]:
@@ -273,6 +288,12 @@ class NewsCrawler(AsyncBaseCrawler):
         # Persist this run's keys for the next run's novelty heuristic.
         self._novelty_keys.update(self._seen_urls)
         save_seen_keys("news", self._novelty_keys)
+
+        # Per-source freshness stamps: fresh_count = accepted records from each source.
+        save_source_freshness(
+            "news",
+            {src["name"]: len(src_records) for src, src_records in zip(self.sources, results) if isinstance(src_records, list)},
+        )
 
         # Post-gather title deduplication pass ensuring zero duplicate pairs
         deduped_records: List[NewsRecord] = []

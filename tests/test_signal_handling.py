@@ -8,7 +8,7 @@ import signal
 from unittest.mock import MagicMock, patch
 import pytest
 
-from src.cli import setup_signal_handlers, run_pipeline
+from src.cli import _warn_stale_sources, setup_signal_handlers, run_pipeline
 from src.resolution.normalizer import entity_resolver
 
 
@@ -66,3 +66,45 @@ async def test_run_pipeline_cancellation_saves_cache():
                 await run_pipeline(run_phase1=True, run_phase2=False, target_count=1)
 
             mock_save.assert_called()
+
+
+def _crafted_freshness(crafted):
+    """Patch helper: load_source_freshness(name) -> crafted.get(name, {})."""
+    return lambda name: crafted.get(name, {})
+
+
+def test_warn_stale_sources_warns_after_two_consecutive_zero_runs(capsys):
+    # Arrange: DeadFeed has 3 consecutive zero-fresh runs; HealthyFeed dipped once only
+    crafted = {
+        "news": {
+            "DeadFeed": {"recent_fresh_counts": [0, 0, 0]},
+            "HealthyFeed": {"recent_fresh_counts": [4, 0]},
+        },
+        "jobs": {},
+    }
+
+    # Act
+    with patch("src.cli.load_source_freshness", side_effect=_crafted_freshness(crafted)):
+        _warn_stale_sources()
+    out = capsys.readouterr().out
+
+    # Assert: only the source with >=2 consecutive zeros is flagged
+    assert "Stale source" in out
+    assert "DeadFeed" in out
+    assert "HealthyFeed" not in out
+
+
+def test_warn_stale_sources_silent_when_all_sources_fresh(capsys):
+    # Arrange: no source has two consecutive zero-fresh runs
+    crafted = {
+        "news": {"HealthyFeed": {"recent_fresh_counts": [5, 0]}},
+        "jobs": {"Board": {"recent_fresh_counts": [2, 3]}},
+    }
+
+    # Act
+    with patch("src.cli.load_source_freshness", side_effect=_crafted_freshness(crafted)):
+        _warn_stale_sources()
+    out = capsys.readouterr().out
+
+    # Assert
+    assert "Stale source" not in out

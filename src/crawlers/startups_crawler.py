@@ -2,6 +2,7 @@ import asyncio
 import time
 from typing import AsyncIterator, List, Optional
 
+from src.config import settings
 from src.crawlers.base import TargetedCrawler, github_headers, is_github_quota_error
 from src.schemas.entities import SourceMetadata, StartupContent, StartupContentData, StartupRecord
 from src.resolution.normalizer import entity_resolver
@@ -13,7 +14,7 @@ class StartupsCrawler(TargetedCrawler):
 
     YC_API_URL = "https://api.ycombinator.com/v0.1/companies?category=artificial_intelligence"
     GITHUB_USERS_API = "https://api.github.com/search/users"
-    HF_MODELS_API = "https://huggingface.co/api/models?limit=1000"
+    HF_MODELS_API = "https://huggingface.co/api/models"  # ?limit= taken from HF_MODELS_LIMIT
     SEARCH_QUERIES = ["type:org ai", "type:org llm", 'type:org "machine learning"']
 
     CANONICAL_SEEDS = [
@@ -81,15 +82,15 @@ class StartupsCrawler(TargetedCrawler):
         if not p1_candidates:
             return
 
-        # Fetch subsequent pages in parallel batches of 4
-        sem = asyncio.Semaphore(4)
+        # Fetch subsequent pages in parallel batches (bounded by YC_PARALLEL_PAGES)
+        sem = asyncio.Semaphore(settings.yc_parallel_pages)
 
         async def _bounded_fetch(p: int) -> List[tuple]:
             async with sem:
                 return await self._fetch_yc_page(p)
 
-        for batch_start in range(2, 25, 4):
-            batch_pages = range(batch_start, min(batch_start + 4, 25))
+        for batch_start in range(settings.yc_start_page, settings.yc_max_page, settings.yc_parallel_pages):
+            batch_pages = range(batch_start, min(batch_start + settings.yc_parallel_pages, settings.yc_max_page))
             results = await asyncio.gather(*(_bounded_fetch(p) for p in batch_pages))
             for page_candidates in results:
                 for cand in page_candidates:
@@ -98,7 +99,7 @@ class StartupsCrawler(TargetedCrawler):
     async def _hf_candidates(self) -> AsyncIterator[tuple]:
         """Yield (name, source, url, employee_count) candidates from Hugging Face model orgs."""
         try:
-            hf_models = await self.fetch_json(self.HF_MODELS_API)
+            hf_models = await self.fetch_json(f"{self.HF_MODELS_API}?limit={settings.hf_models_limit}")
         except Exception as exc:
             logger.warning(f"Error fetching HF models orgs: {exc}")
             return
@@ -112,21 +113,25 @@ class StartupsCrawler(TargetedCrawler):
         for query in self.SEARCH_QUERIES:
             if self._github_blocked():
                 break
-            for page in range(1, 11):
+            for page in range(1, settings.github_search_pages + 1):
                 try:
                     data = await self.fetch_json(
                         self.GITHUB_USERS_API,
                         params={"q": query, "per_page": 100, "page": page},
-                        headers=github_headers(self.github_token),
+                        headers=github_headers(self._pick_github_token(f"{query}:{page}")),
                         allow_tls_fallback=False,
                     )
                 except Exception as exc:
                     logger.warning(f"Error fetching GitHub orgs for '{query}' (page {page}): {exc}")
                     if is_github_quota_error(exc):
-                        # GitHub search API quota exhausted: stop scanning rather than
-                        # burning 27 doomed requests (and browser escalations).
-                        self._github_quota_blocked_until = time.monotonic() + 3600.0
-                        logger.warning("GitHub search quota exhausted; stopping GitHub org scan for an hour.")
+                        # Drop the exhausted token; pause only when every token is gone,
+                        # instead of burning 27 doomed requests (and browser escalations).
+                        token = self._pick_github_token(f"{query}:{page}")
+                        if token:
+                            self._exhausted_github_tokens.add(token)
+                        if self._pick_github_token("") is None:
+                            self._github_quota_blocked_until = time.monotonic() + 3600.0
+                            logger.warning("All GitHub tokens exhausted; stopping GitHub org scan for an hour.")
                         break
                     continue
                 items = (data or {}).get("items", [])
@@ -144,15 +149,20 @@ class StartupsCrawler(TargetedCrawler):
     async def crawl(self) -> List[StartupRecord]:
         """Execute multi-source AI startups collection up to target count."""
         logger.info(f"Starting StartupsCrawler (Target: {self.target_count})...")
+        recovered = self.recover_from_wal(model_cls=StartupRecord)
+        if recovered:
+            logger.info(f"Resumed {recovered} startups from WAL; continuing toward {self.target_count}.")
         for raw_name, url in self.CANONICAL_SEEDS:
             if await self._add_startup(raw_name, "Canonical Seed List (Internal)", url):
                 break
         if not self.is_full:
-            await self._harvest_candidates(self._yc_candidates())
-        if not self.is_full:
-            await self._harvest_candidates(self._hf_candidates())
-        if not self.is_full:
-            await self._harvest_candidates(self._github_candidates())
+            # Harvest all three sources concurrently; quota plumbing keeps the total at target.
+            await asyncio.gather(
+                self._harvest_candidates(self._yc_candidates()),
+                self._harvest_candidates(self._hf_candidates()),
+                self._harvest_candidates(self._github_candidates()),
+            )
+        self.reset_wal_if_complete()
         logger.info(f"Completed StartupsCrawler: {len(self.collected)} startups collected.")
         return self.collected[:self.target_count]
 

@@ -6,11 +6,12 @@ SSRF URL sanitization, and curl-cffi TLS impersonation fallback.
 
 import asyncio
 import json
+import time
 from abc import ABC, abstractmethod
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
-import email.utils
+from urllib.parse import urlparse
 import feedparser
 import httpx
 from curl_cffi.requests import AsyncSession as CurlAsyncSession
@@ -22,9 +23,11 @@ from tenacity import (
 )
 
 from src.config import settings
-from src.utils.date_normalizer import validate_freshness_24h
+from src.utils.date_normalizer import parse_retry_after, validate_freshness_24h
 from src.utils.logger import logger
 from src.utils.security import validate_url_safe
+
+MAX_RETRY_AFTER_SECONDS = 300.0  # honor provider backoffs up to 5 minutes per attempt
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -76,29 +79,101 @@ _CRAWLER_RETRY = retry(
 
 
 async def _handle_retry_after(headers: Any, url: str) -> None:
-    """Inspect and sleep on HTTP 429 Retry-After header (seconds or RFC 7231 HTTP-date), capped at 30 seconds."""
+    """Inspect and sleep on HTTP 429 Retry-After header (seconds or RFC 7231 HTTP-date), capped at 5 minutes."""
     retry_after = headers.get("Retry-After") if headers else None
-    if not retry_after:
-        return
-    wait_time: Optional[float] = None
-    try:
-        wait_time = float(retry_after)
-    except (ValueError, TypeError):
-        try:
-            target_dt = email.utils.parsedate_to_datetime(str(retry_after))
-            if target_dt.tzinfo is None:
-                target_dt = target_dt.replace(tzinfo=timezone.utc)
-            now_dt = datetime.now(timezone.utc)
-            wait_time = (target_dt - now_dt).total_seconds()
-        except Exception as exc:
-            logger.debug(f"Could not parse Retry-After HTTP-date '{retry_after}': {exc}")
-
+    wait_time = parse_retry_after(retry_after)
     if wait_time is not None:
-        capped_wait = max(0.0, min(wait_time, 30.0))
+        capped_wait = max(0.0, min(wait_time, MAX_RETRY_AFTER_SECONDS))
         logger.warning(
             f"HTTP 429 for {url}. Sleeping {capped_wait:.1f}s per Retry-After header ('{retry_after}')."
         )
         await asyncio.sleep(capped_wait)
+
+
+# ---- Anti-bot circuit breaker (per-host) ----
+# A host that keeps returning 403 burns one TLS impersonation + one full browser launch
+# per request. After _BLOCK_THRESHOLD blocks within _BLOCK_WINDOW_SECONDS, escalation is
+# skipped for a _BLOCK_COOLDOWN_SECONDS cooldown and callers fail fast to their fallback.
+_BLOCK_WINDOW_SECONDS = 600.0
+_BLOCK_THRESHOLD = 3
+_BLOCK_COOLDOWN_SECONDS = 1800.0
+
+_block_history: Dict[str, deque] = defaultdict(deque)
+_block_cooldown_until: Dict[str, float] = {}
+
+# Bot-challenge interstitials (Cloudflare/DDoS-Guard/CAPTCHA) can come back as HTTP 200;
+# they are short pages carrying verification markers. Treat them as blocks instead of data.
+_CHALLENGE_MARKERS = (
+    "captcha",
+    "cf-challenge",
+    "cf-chl-",
+    "challenge-platform",
+    "verify you are human",
+    "unusual traffic",
+    "attention required",
+    "are you a robot",
+    "recaptcha",
+    "hcaptcha",
+    "turnstile",
+    "ddos-guard",
+)
+_MAX_CHALLENGE_PAGE_CHARS = 5000
+
+
+def _host_of(url: str) -> str:
+    """Extract the lowercased host from a URL for breaker bookkeeping."""
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return url or ""
+
+
+def _breaker_is_open(host: str) -> bool:
+    """True while the host is in cooldown after tripping the breaker."""
+    return time.monotonic() < _block_cooldown_until.get(host, 0.0)
+
+
+def _record_block(host: str) -> bool:
+    """Record an anti-bot block; returns True if this block trips the breaker."""
+    now = time.monotonic()
+    hist = _block_history[host]
+    hist.append(now)
+    while hist and now - hist[0] > _BLOCK_WINDOW_SECONDS:
+        hist.popleft()
+    if len(hist) >= _BLOCK_THRESHOLD:
+        _block_cooldown_until[host] = now + _BLOCK_COOLDOWN_SECONDS
+        hist.clear()
+        logger.warning(
+            f"Anti-bot circuit breaker tripped for {host}: {_BLOCK_THRESHOLD} blocks within "
+            f"{_BLOCK_WINDOW_SECONDS:.0f}s; skipping escalation for {_BLOCK_COOLDOWN_SECONDS / 60:.0f} min."
+        )
+        return True
+    return False
+
+
+def _record_escalation_success(host: str) -> None:
+    """A successful escalation means the block was transient; reset the host's history."""
+    _block_history[host].clear()
+
+
+def _looks_like_challenge(content: Any) -> bool:
+    """Heuristic: bot-challenge interstitials are short pages carrying verification markers."""
+    if not isinstance(content, str) or not content:
+        return False
+    if len(content) > _MAX_CHALLENGE_PAGE_CHARS:
+        return False
+    lower = content.lower()
+    return any(marker in lower for marker in _CHALLENGE_MARKERS)
+
+
+def anti_bot_snapshot() -> Dict[str, Any]:
+    """Telemetry for the run report: escalation counters and per-host breaker state."""
+    return {
+        "escalation_attempts": AsyncBaseCrawler.escalation_attempts,
+        "escalation_successes": AsyncBaseCrawler.escalation_successes,
+        "open_circuits": sorted(_block_cooldown_until.keys()),
+        "block_counts": {host: len(hist) for host, hist in _block_history.items() if hist},
+    }
 
 
 class AsyncBaseCrawler(ABC):
@@ -217,6 +292,8 @@ class AsyncBaseCrawler(ABC):
                     return await page.content()
 
             content = await asyncio.wait_for(_run_camoufox(), timeout=browser_timeout + 15.0)
+            if _looks_like_challenge(content):
+                raise BotBlockedError(f"Bot challenge page returned by Camoufox for {safe_url}")
             AsyncBaseCrawler.escalation_successes += 1
             return json.loads(content) if as_json else content
         except ImportError as imp_err:
@@ -238,6 +315,9 @@ class AsyncBaseCrawler(ABC):
         logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
         try:
             res_raw = await self.fetch_tls(url, params=params, timeout=timeout)
+            if _looks_like_challenge(res_raw):
+                # 200-with-challenge is a block, not data; let the Camoufox tier try.
+                raise BotBlockedError(f"Bot challenge page returned by TLS tier for {url}")
             AsyncBaseCrawler.escalation_successes += 1
             return json.loads(res_raw) if as_json else res_raw
         except BotBlockedError:
@@ -259,7 +339,27 @@ class AsyncBaseCrawler(ABC):
         except BotBlockedError:
             if not allow_tls_fallback:
                 raise
-            return await self._escalate_tls(url, params=params, timeout=timeout)
+            return await self._handle_bot_block(url, params=params, timeout=timeout, as_json=False)
+
+    async def _handle_bot_block(
+        self,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+        as_json: bool = False,
+    ) -> Any:
+        """Circuit-breaker-aware escalation: hosts that keep returning 403 skip the
+        TLS/browser tiers (each costs a browser launch) and fail fast to the caller's
+        fallback for a cooldown window. Successful escalation resets the host's history."""
+        host = _host_of(url)
+        if _breaker_is_open(host):
+            logger.warning(f"Anti-bot circuit open for {host}; skipping escalation for {url}.")
+            raise BotBlockedError(f"Circuit open for {host}; escalation skipped (repeated blocks).")
+        if _record_block(host):
+            raise BotBlockedError(f"Circuit tripped for {host}; escalation skipped this request.")
+        result = await self._escalate_tls(url, params=params, timeout=timeout, as_json=as_json)
+        _record_escalation_success(host)
+        return result
 
     async def fetch_json(
         self,
@@ -275,7 +375,7 @@ class AsyncBaseCrawler(ABC):
         except BotBlockedError:
             if not allow_tls_fallback:
                 raise
-            return await self._escalate_tls(url, params=params, timeout=timeout, as_json=True)
+            return await self._handle_bot_block(url, params=params, timeout=timeout, as_json=True)
 
     @_CRAWLER_RETRY
     async def fetch_tls(
@@ -340,11 +440,23 @@ class TargetedCrawler(AsyncBaseCrawler):
             wal_enabled or getattr(settings, "enable_wal", False) or (wal_path is not None)
         )
         self.wal_path: Optional[str] = wal_path or (
-            str(Path("exports/wal") / f"{self.__class__.__name__.lower()}_wal.jsonl")
+            str(Path(settings.wal_dir) / f"{self.__class__.__name__.lower()}_wal.jsonl")
             if self.wal_enabled
             else None
         )
         self._wal_file = None
+        # GitHub token pool: GITHUB_TOKENS for scale, GITHUB_TOKEN as the single-key fallback.
+        self.github_tokens: List[str] = settings.github_token_list
+        self._exhausted_github_tokens: set = set()
+
+    def _pick_github_token(self, key: str = "") -> Optional[str]:
+        """Choose a non-exhausted GitHub token (stable per key) or None for anonymous mode."""
+        available = [t for t in self.github_tokens if t not in self._exhausted_github_tokens]
+        if not available:
+            return None
+        if len(available) == 1:
+            return available[0]
+        return available[hash(key or "default") % len(available)]
 
     def _get_wal_file(self):
         """Lazily initialize and open append-only WAL file."""
@@ -430,11 +542,24 @@ class TargetedCrawler(AsyncBaseCrawler):
             self._write_wal(key, item)
         return self.is_full
 
+    def reset_wal_if_complete(self) -> None:
+        """Truncate the WAL when the run reached its target, so a later run starts fresh
+        instead of resuming stale records. Interrupted runs keep the WAL for recovery."""
+        if self.wal_enabled and self.is_full and self.wal_path:
+            try:
+                self.close_wal()
+                open(self.wal_path, "w", encoding="utf-8").close()
+                logger.info(f"Run complete; truncated WAL {self.wal_path}.")
+            except OSError as exc:
+                logger.warning(f"Could not truncate WAL {self.wal_path}: {exc}")
+
     def recover_from_wal(self, model_cls: Optional[Any] = None) -> int:
-        """Recover collected records and deduplication keys from WAL. Returns count of recovered items."""
+        """Recover collected records and deduplication keys from WAL. Returns count of recovered items.
+        Compacts the WAL to the recovered remainder so replay cost stays bounded across repeated interruptions."""
         if not self.wal_path or not Path(self.wal_path).exists():
             return 0
         recovered_count = 0
+        remainder: List[Dict[str, Any]] = []
         try:
             with open(self.wal_path, "r", encoding="utf-8") as f:
                 for line in f:
@@ -464,9 +589,23 @@ class TargetedCrawler(AsyncBaseCrawler):
                             item = data
                     else:
                         item = data
+                    remainder.append({"key": key, "data": data})
                     self.collected.append(item)
                     recovered_count += 1
             logger.info(f"Recovered {recovered_count} items from WAL ({self.wal_path}).")
         except Exception as exc:
             logger.error(f"Error recovering from WAL {self.wal_path}: {exc}")
+        if self.wal_enabled and recovered_count > 0:
+            self._rewrite_wal(remainder)
         return recovered_count
+
+    def _rewrite_wal(self, entries: List[Dict[str, Any]]) -> None:
+        """Rewrite the WAL with the given entries (compaction after recovery)."""
+        try:
+            self.close_wal()
+            with open(self.wal_path, "w", encoding="utf-8") as f:
+                for entry in entries:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                f.flush()
+        except OSError as exc:
+            logger.warning(f"WAL compaction failed for {self.wal_path}: {exc}")

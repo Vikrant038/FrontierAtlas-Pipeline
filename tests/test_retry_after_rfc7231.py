@@ -26,9 +26,9 @@ async def test_retry_after_integer_seconds():
 
 
 @pytest.mark.asyncio
-async def test_retry_after_integer_capped_at_30s():
+async def test_retry_after_integer_capped_at_300s():
     # Arrange
-    headers = {"Retry-After": "120"}
+    headers = {"Retry-After": "600"}
     mock_sleep = AsyncMock()
 
     with patch("asyncio.sleep", mock_sleep):
@@ -36,7 +36,7 @@ async def test_retry_after_integer_capped_at_30s():
         await _handle_retry_after(headers, "https://example.com/api")
 
         # Assert
-        mock_sleep.assert_awaited_once_with(30.0)
+        mock_sleep.assert_awaited_once_with(300.0)
 
 
 @freeze_time("2026-09-04 12:00:00")

@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import feedparser
 
+from src.config import settings
 from src.crawlers.base import BotBlockedError, TargetedCrawler, github_headers, is_github_quota_error
 from src.schemas.entities import ResearchPaperContent, ResearchPaperRecord
 from src.utils.date_normalizer import parse_datetime_to_utc
@@ -17,7 +18,8 @@ from src.utils.logger import logger
 
 GITHUB_URL_PATTERN = re.compile(r"https?://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
 
-GITHUB_MIN_REQUEST_INTERVAL_SECONDS = 2.1  # ~28 req/min, safely under 5,000/hr authenticated & 60/hr anonymous budgets
+GITHUB_MIN_REQUEST_INTERVAL_SECONDS = 2.1  # default pace; overridable via GITHUB_INTERVAL_SECONDS
+GITHUB_ANONYMOUS_LOOKUP_BUDGET = 50  # default anonymous cap; overridable via GITHUB_ANONYMOUS_LOOKUP_BUDGET
 
 
 def _paper_record(
@@ -41,8 +43,8 @@ class ResearchPapersCrawler(TargetedCrawler):
     """Production-grade ArXiv crawler with leaky-bucket rate limiting and author code correlation."""
 
     ARXIV_API_BASE = "https://export.arxiv.org/api/query"
-    ARXIV_INTERVAL_SECONDS = 3.2  # Strict 1 req / 3s ArXiv policy enforcement
-    CDN_CATEGORIES = ["cs.AI", "cs.LG", "cs.CV", "cs.CL", "cs.NE"]
+    ARXIV_INTERVAL_SECONDS = 3.2  # default; overridable via ARXIV_INTERVAL_SECONDS
+    CDN_CATEGORIES = ["cs.AI", "cs.LG", "cs.CV", "cs.CL", "cs.NE"]  # default; overridable via ARXIV_CDN_CATEGORIES
 
     def __init__(self, target_count: int = 1000, **kwargs):
         super().__init__(target_count=target_count, **kwargs)
@@ -53,6 +55,7 @@ class ResearchPapersCrawler(TargetedCrawler):
         # Sentinel backs off star enrichment for one hour after quota exhaustion
         # (prevents thousands of doomed requests in anonymous mode: 60 req/hr cap).
         self._github_quota_blocked_until: float = 0.0
+        self._anonymous_lookups: int = 0
 
     def _github_quota_blocked(self) -> bool:
         """True while the one-hour GitHub quota backoff window is active."""
@@ -73,37 +76,61 @@ class ResearchPapersCrawler(TargetedCrawler):
         # Serialize the check-then-sleep-then-stamp sequence: concurrent enrich
         # tasks each reserve a distinct slot spaced by the minimum interval.
         async with self._github_pace_lock:
-            await asyncio.sleep(self._seconds_until_slot(self._last_github_time, GITHUB_MIN_REQUEST_INTERVAL_SECONDS))
+            await asyncio.sleep(
+                self._seconds_until_slot(self._last_github_time, settings.github_interval_seconds)
+            )
             self._last_github_time = time.monotonic()
 
     async def _fetch_stars(self, repo_path: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
-        """GitHub repository and star lookup with pacing and quota-exhaustion shutdown."""
+        """GitHub repository and star lookup with pacing, token-pool rotation, and quota-exhaustion backoff."""
         if not repo_path:
             return None, None
         if self._github_quota_blocked():
             logger.debug(f"GitHub quota backoff active; skipping star lookup for {repo_path}.")
             return f"https://github.com/{repo_path}", None
 
+        token = self._pick_github_token(repo_path)
+        if token is None and self._anonymous_lookups >= settings.github_anonymous_lookup_budget:
+            # Anonymous GitHub REST caps at 60 req/hr: stop gracefully instead of burning 403s.
+            logger.info(
+                f"Anonymous GitHub budget ({settings.github_anonymous_lookup_budget}/hr) reached; "
+                "pausing star enrichment for one hour."
+            )
+            self._github_quota_blocked_until = time.monotonic() + 3600.0
+            return f"https://github.com/{repo_path}", None
+        if token is None:
+            self._anonymous_lookups += 1
+
         await self._pace_github()
         try:
             # GitHub API 403 = quota exhaustion, not fingerprint blocking; TLS retry cannot help.
             data = await self.fetch_json(
                 f"https://api.github.com/repos/{repo_path}",
-                headers=github_headers(self.github_token),
+                headers=github_headers(token),
                 allow_tls_fallback=False,
             )
             if data and "stargazers_count" in data:
                 return f"https://github.com/{repo_path}", data["stargazers_count"]
         except BotBlockedError as exc:
             if is_github_quota_error(exc):
-                self._disable_github_enrichment()
+                self._mark_github_token_exhausted(token)
             else:
                 logger.warning(f"GitHub 403 (not quota) for {repo_path}: {exc}")
         except Exception as exc:
             logger.warning(f"GitHub star lookup failed for {repo_path}: {exc}")
             if is_github_quota_error(exc):
-                self._disable_github_enrichment()
+                self._mark_github_token_exhausted(token)
         return f"https://github.com/{repo_path}", None
+
+    def _mark_github_token_exhausted(self, token: Optional[str]) -> None:
+        """Drop an exhausted token from the pool; pause enrichment only when every token is gone."""
+        if token:
+            self._exhausted_github_tokens.add(token)
+            logger.warning(
+                f"GitHub token exhausted (quota); removed from pool ({len(self._exhausted_github_tokens)}/{len(self.github_tokens) or 1})."
+            )
+        if self._pick_github_token("") is None:
+            self._disable_github_enrichment()
 
     def _parse_feed_entry(self, entry: Any) -> Optional[Dict[str, Any]]:
         """Extract and normalize paper metadata from Atom or RSS feed entry."""
@@ -160,11 +187,11 @@ class ResearchPapersCrawler(TargetedCrawler):
     async def _query_arxiv_api(self, start: int, limit: int) -> List[Dict[str, Any]]:
         """Query official Arxiv Atom API with leaky-bucket pacing and automatic retry backoff."""
         # Arxiv API asks <= 3 requests/second; pace against the configured interval.
-        await asyncio.sleep(self._seconds_until_slot(self._last_arxiv_time, self.ARXIV_INTERVAL_SECONDS))
+        await asyncio.sleep(self._seconds_until_slot(self._last_arxiv_time, settings.arxiv_interval_seconds))
         self._last_arxiv_time = time.monotonic()
 
         params = {
-            "search_query": "(cat:cs.AI OR cat:cs.LG OR cat:cs.CV OR cat:cs.CL) AND (all:github OR all:code)",
+            "search_query": settings.arxiv_search_query,
             "start": start,
             "max_results": limit,
             "sortBy": "submittedDate",
@@ -184,7 +211,8 @@ class ResearchPapersCrawler(TargetedCrawler):
     async def _query_arxiv_cdn(self, limit: int) -> List[Dict[str, Any]]:
         """Harvest fresh papers from Fastly CDN-cached Arxiv RSS feeds."""
         results: List[Dict[str, Any]] = []
-        for cat in self.CDN_CATEGORIES:
+        for cat in settings.arxiv_cdn_categories.split(","):
+            cat = cat.strip()
             if len(results) >= limit:
                 break
             try:
@@ -201,7 +229,7 @@ class ResearchPapersCrawler(TargetedCrawler):
     async def _query_hf_papers(self, limit: int) -> List[Dict[str, Any]]:
         """Harvest fresh papers from Hugging Face Daily Papers API with verified code repos."""
         try:
-            items = await self.fetch_json("https://huggingface.co/api/daily_papers?limit=100")
+            items = await self.fetch_json(f"https://huggingface.co/api/daily_papers?limit={settings.hf_daily_limit}")
         except Exception as exc:
             logger.warning(f"HF daily papers error: {repr(exc)}")
             return []
@@ -228,9 +256,12 @@ class ResearchPapersCrawler(TargetedCrawler):
         params = {
             "filter": "primary_location.source.id:S4306400194,concepts.id:C154945302",
             "sort": "publication_date:desc",
-            "per-page": min(100, limit),
+            "per-page": min(settings.openalex_per_page, limit),
             "page": page,
         }
+        if settings.openalex_email:
+            # Polite-pool attribution raises the daily cap from 100k to 1M works/day.
+            params["mailto"] = settings.openalex_email
         try:
             data = await self.fetch_json("https://api.openalex.org/works", params=params)
         except Exception as exc:
@@ -300,11 +331,14 @@ class ResearchPapersCrawler(TargetedCrawler):
     async def crawl(self) -> List[ResearchPaperRecord]:
         """Execute concurrent papers acquisition with decoupled ingestion and enrichment."""
         logger.info(f"Starting ResearchPapersCrawler (Target: {self.target_count} papers)...")
+        recovered = self.recover_from_wal(model_cls=ResearchPaperRecord)
+        if recovered:
+            logger.info(f"Resumed {recovered} papers from WAL; continuing toward {self.target_count}.")
         offset = 0
         enrich_tasks: List[asyncio.Task] = []
 
         while not self.is_full:
-            needed = min(500, self.remaining)
+            needed = min(settings.papers_batch_size, self.remaining)
             papers = await self.fetch_papers_batch(offset, needed)
             if not papers:
                 break
@@ -349,5 +383,6 @@ class ResearchPapersCrawler(TargetedCrawler):
         if enrich_tasks:
             await asyncio.gather(*enrich_tasks, return_exceptions=True)
 
+        self.reset_wal_if_complete()
         logger.info(f"Completed ResearchPapersCrawler: {len(self.collected)} papers collected.")
         return self.collected[:self.target_count]

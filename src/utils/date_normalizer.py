@@ -3,6 +3,7 @@ Temporal normalization and 24-hour signal freshness validation engine.
 Enforces Phase II freshness requirements from PROJECT_CONTEXT.md.
 """
 
+import email.utils
 import json
 import re
 from datetime import datetime, timezone
@@ -12,6 +13,24 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 
 from src.utils.logger import logger
+
+
+def parse_retry_after(retry_after: Any) -> Optional[float]:
+    """Parse a Retry-After header value (integer seconds or RFC 7231 HTTP-date) into seconds.
+    Returns None when absent or unparseable."""
+    if not retry_after:
+        return None
+    try:
+        return float(retry_after)
+    except (ValueError, TypeError):
+        try:
+            target_dt = email.utils.parsedate_to_datetime(str(retry_after))
+            if target_dt.tzinfo is None:
+                target_dt = target_dt.replace(tzinfo=timezone.utc)
+            return (target_dt - datetime.now(timezone.utc)).total_seconds()
+        except Exception as exc:
+            logger.debug(f"Could not parse Retry-After HTTP-date '{retry_after}': {exc}")
+            return None
 
 
 def parse_datetime_to_utc(date_val: Any) -> Optional[datetime]:

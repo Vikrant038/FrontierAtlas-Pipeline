@@ -4,12 +4,18 @@ Supports executing individual phases or running the end-to-end extraction and ex
 """
 
 import asyncio
+import json
+import os
 import signal
-from typing import Callable, List, Optional
+import time
+from contextlib import suppress
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import click
 from rich.console import Console
 from rich.table import Table
 
+from src.config import settings
+from src.crawlers.base import anti_bot_snapshot
 from src.crawlers.papers_crawler import ResearchPapersCrawler
 from src.crawlers.startups_crawler import StartupsCrawler
 from src.crawlers.products_crawler import ProductsCrawler
@@ -22,14 +28,158 @@ from src.exporters.sheets_exporter import GoogleSheetsExporter
 from src.llm.fallback_chain import llm_engine
 from src.resolution.normalizer import entity_resolver
 from src.utils.logger import logger, setup_logging
+from src.utils.run_state import load_source_freshness
+
+# WAL checkpointing kicks in for long runs so an interrupted crawl resumes from exports/wal/.
+WAL_AUTO_ENABLE_TARGET = 1000
+
+
+def _warn_config(run_phase1: bool, upload_sheets: bool, target_count: int) -> None:
+    """Surface configuration gaps up front instead of letting them degrade silently."""
+    if run_phase1:
+        if not settings.github_token:
+            console.print(
+                "[yellow]⚠️  GITHUB_TOKEN not set: GitHub star enrichment runs in anonymous mode "
+                "(~50 lookups, then pauses for an hour). Set GITHUB_TOKEN in .env for full enrichment.[/yellow]"
+            )
+        if not (settings.gemini_api_key or settings.groq_api_key or settings.effective_tier3_api_key):
+            console.print(
+                "[yellow]⚠️  No LLM API keys set: extraction will be deterministic-only. "
+                "Set at least one of GEMINI_API_KEY / GROQ_API_KEY / CUSTOM_LLM_API_KEY in .env.[/yellow]"
+            )
+        if target_count >= WAL_AUTO_ENABLE_TARGET:
+            console.print("[dim]WAL checkpointing enabled: an interrupted run resumes from exports/wal/.[/dim]")
+    if upload_sheets and not settings.effective_service_account_path:
+        console.print(
+            "[yellow]⚠️  --sheets requested but GOOGLE_SERVICE_ACCOUNT_PATH is not set; upload will be skipped.[/yellow]"
+        )
+
+
+def _warn_stale_sources() -> None:
+    """Surface news/job sources that produced 0 fresh items for >=2 consecutive runs
+    (a dead feed looks like a healthy '0 fresh' run unless we track the history)."""
+    for crawler_name in ("news", "jobs"):
+        for source, entry in load_source_freshness(crawler_name).items():
+            history = entry.get("recent_fresh_counts") if isinstance(entry, dict) else None
+            if not isinstance(history, list):
+                continue
+            trailing_zeros = 0
+            for count in reversed(history):
+                if count == 0:
+                    trailing_zeros += 1
+                else:
+                    break
+            if trailing_zeros >= 2:
+                console.print(
+                    f"[yellow]⚠️  Stale source: '{source}' ({crawler_name}) produced 0 fresh items "
+                    f"for {trailing_zeros} consecutive runs — the feed may be down or its URL may have changed.[/yellow]"
+                )
+
+
+def _write_run_report(
+    run_id: str,
+    duration_s: float,
+    status: str,
+    counts: Dict[str, int],
+    target_count: int,
+    resolution_log_rows: int,
+    phase1: bool,
+    phase2: bool,
+) -> str:
+    """Persist a machine-readable run report (CI/cron alerting primitive)."""
+    report = {
+        "run_id": run_id,
+        "status": status,
+        "phase1": phase1,
+        "phase2": phase2,
+        "duration_seconds": round(duration_s, 1),
+        "target_count": target_count,
+        "collected": counts,
+        "resolution_log_rows": resolution_log_rows,
+        "llm_tier_usage": llm_engine.get_tier_usage(),
+        "anti_bot": anti_bot_snapshot(),
+    }
+    os.makedirs("exports", exist_ok=True)
+    path = "exports/run_report.json"
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    os.replace(tmp_path, path)
+    logger.info(f"Run report persisted to {path}: status={status}, counts={counts}")
+    return path
+
+
+async def _periodic_cache_save(interval: float = 600.0) -> None:
+    """Periodically persist the entity registry so a hard kill loses at most `interval` of learning."""
+    while True:
+        await asyncio.sleep(interval)
+        entity_resolver.save_cache()
 
 console = Console()
 
 
-async def _crawl(crawler_cls, **kwargs):
-    """Execute a crawler safely within an async context manager for connection cleanup."""
+# Live crawler registry: _progress_monitor polls these instances mid-run to report
+# collected-vs-target counts without waiting for a crawler to finish.
+_ACTIVE_CRAWLERS: Dict[str, Any] = {}
+
+
+async def _crawl(name: str, crawler_cls, **kwargs):
+    """Execute a crawler safely within an async context manager, exposing it for live progress."""
     async with crawler_cls(**kwargs) as crawler:
-        return await crawler.crawl()
+        _ACTIVE_CRAWLERS[name] = crawler
+        try:
+            return await crawler.crawl()
+        finally:
+            _ACTIVE_CRAWLERS.pop(name, None)
+
+
+def _crawler_progress(name: str) -> Tuple[int, Optional[int]]:
+    """Return (collected, target) for a live crawler; (0, None) when not active."""
+    crawler = _ACTIVE_CRAWLERS.get(name)
+    if crawler is None:
+        return 0, None
+    collected = getattr(crawler, "collected", None)
+    if collected is None:
+        stats = getattr(crawler, "stats", None)  # news: per-source processed totals
+        if stats:
+            return sum(s.get("total", 0) for s in stats.values()), None
+        return getattr(crawler, "_live_count", 0), None  # jobs: fresh records built
+    return len(collected), getattr(crawler, "target_count", None)
+
+
+async def _progress_monitor(interval: float, run_phase1: bool, run_phase2: bool) -> None:
+    """Periodically print per-vertical collected/target/remaining/ETA while the pipeline runs."""
+    names = []
+    if run_phase1:
+        names += ["papers", "startups", "products"]
+    if run_phase2:
+        names += ["news", "jobs"]
+    if not names:
+        return
+    start = time.monotonic()
+    console.print(f"[dim]Live progress reporting every {interval:.0f}s — counts refresh automatically.[/dim]")
+    while True:
+        await asyncio.sleep(interval)
+        elapsed_min = (time.monotonic() - start) / 60.0
+        table = Table(title=f"Live Pipeline Progress — elapsed {elapsed_min:.1f} min")
+        table.add_column("Vertical", style="cyan", no_wrap=True)
+        table.add_column("Collected", style="magenta")
+        table.add_column("Target", style="magenta")
+        table.add_column("Remaining", style="yellow")
+        table.add_column("ETA", style="green")
+        for n in names:
+            collected, target = _crawler_progress(n)
+            if target:
+                remaining = max(0, target - collected)
+                pct = f" ({100.0 * collected / target:.0f}%)"
+                eta = ""
+                if collected > 0 and elapsed_min > 0:
+                    rate = collected / elapsed_min
+                    eta = f"~{remaining / rate:.0f} min" if rate > 0 else ""
+                table.add_row(n, f"{collected}{pct}", str(target), str(remaining), eta)
+            else:
+                table.add_row(n, str(collected), "— (24h window)", "—", "")
+        console.print(table)
 
 
 async def _safe_gather(tasks) -> List[list]:
@@ -140,30 +290,43 @@ async def run_pipeline(
     target_count: int = 1000,
     output_xlsx: str = "exports/FrontierAtlas_Intelligence.xlsx",
     upload_sheets: bool = False,
+    progress_interval: float = 180.0,
 ):
     """Execute async pipeline phases and export structured deliverables."""
     loop = asyncio.get_running_loop()
     setup_signal_handlers(loop)
     console.print("[bold blue]🚀 Launching FrontierAtlas AI Data Intelligence Pipeline...[/bold blue]")
 
+    run_started = time.monotonic()
+    run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     startups, products, papers, jobs, news = [], [], [], [], []
+
+    monitor_task = (
+        asyncio.create_task(_progress_monitor(progress_interval, run_phase1, run_phase2))
+        if progress_interval > 0
+        else None
+    )
+    cache_save_task = asyncio.create_task(_periodic_cache_save())
 
     try:
         phase1_tasks = []
         if run_phase1:
             console.print(f"[yellow]Launching Phase I: Bulk Acquisition (Target: {target_count})...[/yellow]")
             phase1_tasks = [
-                _crawl(ResearchPapersCrawler, target_count=target_count),
-                _crawl(StartupsCrawler, target_count=target_count),
-                _crawl(ProductsCrawler, target_count=target_count),
+                _crawl("papers", ResearchPapersCrawler, target_count=target_count,
+                       wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
+                _crawl("startups", StartupsCrawler, target_count=target_count,
+                       wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
+                _crawl("products", ProductsCrawler, target_count=target_count,
+                       wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
             ]
 
         phase2_tasks = []
         if run_phase2:
             console.print("[yellow]Launching Phase II: 24h Signal Monitoring (5 News + 5 Job Boards)...[/yellow]")
             phase2_tasks = [
-                _crawl(NewsCrawler),
-                _crawl(JobsCrawler),
+                _crawl("news", NewsCrawler),
+                _crawl("jobs", JobsCrawler),
             ]
 
         if phase1_tasks and phase2_tasks:
@@ -178,7 +341,25 @@ async def run_pipeline(
     except asyncio.CancelledError:
         console.print("[yellow]Pipeline execution interrupted. Saving entity cache and exiting...[/yellow]")
         entity_resolver.save_cache()
+        _write_run_report(
+            run_id=run_id,
+            duration_s=time.monotonic() - run_started,
+            status="interrupted",
+            counts={name: _crawler_progress(name)[0] for name in ("papers", "startups", "products", "news", "jobs")},
+            target_count=target_count,
+            resolution_log_rows=len(entity_resolver.audit_log),
+            phase1=run_phase1,
+            phase2=run_phase2,
+        )
         raise
+    finally:
+        if monitor_task is not None:
+            monitor_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await monitor_task
+        cache_save_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cache_save_task
 
     # Phase IV: Entity Resolution Audit Logs
     # Every resolve() call during crawls already appended to the central audit log.
@@ -188,40 +369,18 @@ async def run_pipeline(
     # Persist learned entities & domain grounding so subsequent runs start warm.
     await asyncio.to_thread(entity_resolver.save_cache)
 
-    # Phase VI: Export Deliverables
-    console.print("[yellow]Executing Phase VI: Exporting 6-Tab Excel & Graph Construction...[/yellow]")
+    # Phase VI: Export Deliverables — the three exports are independent, so run them concurrently
+    console.print("[yellow]Executing Phase VI: Exporting 6-Tab Excel, CSVs & Graph Construction...[/yellow]")
     exporter = ExcelExporter()
-    await asyncio.to_thread(
-        exporter.export,
-        filepath=output_xlsx,
-        startups=startups,
-        products=products,
-        papers=papers,
-        jobs=jobs,
-        news=news,
-        logs=logs,
-    )
-
     csv_exporter = CSVExporter()
-    await asyncio.to_thread(
-        csv_exporter.export_all,
-        startups=startups,
-        products=products,
-        papers=papers,
-        jobs=jobs,
-        news=news,
-        logs=logs,
-    )
-
-    # In-memory graph
     graph_builder = KnowledgeGraphBuilder()
-    await asyncio.to_thread(
-        graph_builder.build_graph,
-        startups=startups,
-        products=products,
-        papers=papers,
-        jobs=jobs,
-        news=news,
+    await asyncio.gather(
+        asyncio.to_thread(exporter.export, filepath=output_xlsx, startups=startups, products=products,
+                          papers=papers, jobs=jobs, news=news, logs=logs),
+        asyncio.to_thread(csv_exporter.export_all, startups=startups, products=products,
+                          papers=papers, jobs=jobs, news=news, logs=logs),
+        asyncio.to_thread(graph_builder.build_graph, startups=startups, products=products,
+                          papers=papers, jobs=jobs, news=news),
     )
     metrics = graph_builder.get_summary_metrics()
 
@@ -268,9 +427,27 @@ async def run_pipeline(
             logs=logs,
         )
 
+    _warn_stale_sources()
+
     shortfall = run_phase1 and any(len(x) < target_count for x in (startups, products, papers))
     if shortfall:
         console.print("[bold red]⚠️  Phase I target shortfall detected; exit code will be 1.[/bold red]")
+    _write_run_report(
+        run_id=run_id,
+        duration_s=time.monotonic() - run_started,
+        status="shortfall" if shortfall else "completed",
+        counts={
+            "startups": len(startups),
+            "products": len(products),
+            "papers": len(papers),
+            "news": len(news),
+            "jobs": len(jobs),
+        },
+        target_count=target_count,
+        resolution_log_rows=len(logs),
+        phase1=run_phase1,
+        phase2=run_phase2,
+    )
     return not shortfall
 
 
@@ -283,11 +460,13 @@ PHASE1_OUTPUT_XLSX = "exports/phase1_test.xlsx"
 @click.option("--target", type=int, default=1000, help="Target record count for Phase I")
 @click.option("--output", type=str, default=None, help="Output Excel path (default: phase1_test.xlsx for --phase 1, else FrontierAtlas_Intelligence.xlsx)")
 @click.option("--sheets", is_flag=True, default=False, help="Upload deliverables to Google Sheets (requires GOOGLE_SERVICE_ACCOUNT_PATH)")
-def main(phase: str, target: int, output: str, sheets: bool):
+@click.option("--progress-interval", type=int, default=180, help="Seconds between live progress updates (0 disables)")
+def main(phase: str, target: int, output: str, sheets: bool, progress_interval: int):
     """FrontierAtlas AI Intelligence Pipeline CLI."""
     setup_logging()
     run_phase1 = phase in ("1", "all")
     run_phase2 = phase in ("2", "all")
+    _warn_config(run_phase1, sheets, target)
     # Default output aligns with scripts/verify_phase1.py expectations per phase.
     output_xlsx = output or (PHASE1_OUTPUT_XLSX if phase == "1" else DEFAULT_OUTPUT_XLSX)
     try:
@@ -298,6 +477,7 @@ def main(phase: str, target: int, output: str, sheets: bool):
                 target_count=target,
                 output_xlsx=output_xlsx,
                 upload_sheets=sheets,
+                progress_interval=progress_interval,
             )
         )
     except (KeyboardInterrupt, asyncio.CancelledError):

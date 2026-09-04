@@ -6,6 +6,7 @@ idempotent tab management, and evaluator sharing.
 """
 
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 import gspread
 from tenacity import (
@@ -17,6 +18,7 @@ from tenacity import (
 
 from src.config import settings
 from src.exporters.base import ENTITY_SPECS
+from src.utils.date_normalizer import parse_retry_after
 from src.schemas.entities import (
     EntityResolutionLog,
     JobRecord,
@@ -28,13 +30,28 @@ from src.schemas.entities import (
 from src.utils.logger import logger
 
 
-BATCH_SIZE = 500
+BATCH_SIZE = settings.sheets_batch_size  # configurable for quota tuning at scale
 DEFAULT_SPREADSHEET_TITLE = "FrontierAtlas AI Intelligence"
 
 
 def _dims(num_rows: int, num_cols: int) -> Tuple[int, int]:
     """Minimum worksheet dimensions (100 rows x 10 cols) for readable auto-resize."""
     return max(num_rows, 100), max(num_cols, 10)
+
+
+def _sheets_before_sleep(retry_state) -> None:
+    """Honor the Retry-After header (seconds or RFC 7231 HTTP-date) before a Sheets retry."""
+    exc = retry_state.outcome.exception()
+    if exc is None:
+        return
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None) if resp is not None else None
+    retry_after = headers.get("Retry-After") if headers else None
+    wait_time = parse_retry_after(retry_after)
+    if wait_time is not None and wait_time > 0:
+        wait = min(wait_time, 300.0)
+        logger.warning(f"Sleeping {wait:.0f}s per Sheets Retry-After header before retry.")
+        time.sleep(wait)
 
 
 def _is_transient_sheets_error(exc: BaseException) -> bool:
@@ -58,6 +75,7 @@ _SHEETS_RETRY = retry(
     wait=wait_exponential_jitter(initial=1.0, max=20.0, exp_base=2, jitter=2.0),
     stop=stop_after_attempt(5),
     retry=retry_if_exception(_is_transient_sheets_error),
+    before_sleep=_sheets_before_sleep,
     reraise=True,
 )
 

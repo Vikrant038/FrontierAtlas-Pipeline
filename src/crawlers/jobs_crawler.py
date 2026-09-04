@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, List, Optional, Tuple
 
+from src.config import settings
 from src.crawlers.base import AsyncBaseCrawler
 from src.llm.fallback_chain import llm_engine
 from src.llm.prompts import JOB_EXTRACTION_PROMPT, JobExtractionSchema
@@ -11,7 +12,7 @@ from src.schemas.entities import JobContent, JobRecord, RoleFamilyEnum, SourceMe
 from src.resolution.normalizer import entity_resolver
 from src.utils.date_normalizer import infer_content_freshness
 from src.utils.logger import logger
-from src.utils.run_state import load_seen_keys, save_seen_keys
+from src.utils.run_state import load_seen_keys, save_seen_keys, save_source_freshness
 
 AI_KEYWORD_PATTERN = re.compile(
     r"\bai\b|machine learning|\bml\b|\bllm\b|data scien|deep learning",
@@ -27,6 +28,7 @@ class JobsCrawler(AsyncBaseCrawler):
         # Keys collected in the PREVIOUS run: cross-run novelty heuristic state.
         self._prev_run_urls = load_seen_keys("jobs")
         self._novelty_keys: set = set()
+        self._live_count: int = 0  # fresh records built so far (live progress reporting)
 
     @staticmethod
     def _is_remote(location: str = "", tags: Optional[List[str]] = None, title: str = "") -> bool:
@@ -65,6 +67,7 @@ class JobsCrawler(AsyncBaseCrawler):
             self._novelty_keys.add(norm_url)
             logger.debug(f"Dateless posting treated as new-since-last-run: '{title}' ({source_name}).")
         canonical, _ = await entity_resolver.resolve_async(raw_name=raw_company, source_url=url, entity_type="STARTUP")
+        self._live_count += 1
         return JobRecord(
             source=SourceMetadata(name=source_name, url=url),
             content=JobContent(
@@ -112,7 +115,7 @@ class JobsCrawler(AsyncBaseCrawler):
     async def fetch_remoteok(self) -> List[JobRecord]:
         records: List[JobRecord] = []
         try:
-            items = await self.fetch_json("https://remoteok.com/api?tag=ai")
+            items = await self.fetch_json(settings.jobs_remoteok_url)
             items = items[1:] if isinstance(items, list) and items and "legal" in str(items[0]) else (items or [])
 
             def _map(item):
@@ -136,7 +139,7 @@ class JobsCrawler(AsyncBaseCrawler):
     async def fetch_arbeitnow(self) -> List[JobRecord]:
         records: List[JobRecord] = []
         try:
-            data = await self.fetch_json("https://www.arbeitnow.com/api/job-board-api")
+            data = await self.fetch_json(settings.jobs_arbeitnow_url)
             items = [i for i in (data or {}).get("data", []) if "arbeitnow.co.uk" not in i.get("url", "")]
 
             def _map(item):
@@ -198,7 +201,7 @@ class JobsCrawler(AsyncBaseCrawler):
     async def fetch_himalayas(self) -> List[JobRecord]:
         records: List[JobRecord] = []
         try:
-            data = await self.fetch_json("https://himalayas.app/jobs/api?q=ai")
+            data = await self.fetch_json(settings.jobs_himalayas_api_url)
 
             def _map(job):
                 return {
@@ -213,17 +216,13 @@ class JobsCrawler(AsyncBaseCrawler):
         except Exception as exc:
             logger.warning(f"Himalayas API fetch error: {exc}")
         if not records:
-            records = await self._fetch_feed_jobs("https://himalayas.app/jobs/rss", "Himalayas AI")
+            records = await self._fetch_feed_jobs(settings.jobs_himalayas_rss_url, "Himalayas AI")
         return records
 
     async def fetch_weworkremotely(self) -> List[JobRecord]:
         records: List[JobRecord] = []
         seen_urls = set()
-        urls = [
-            "https://weworkremotely.com/remote-jobs.rss",
-            "https://weworkremotely.com/categories/remote-programming-jobs.rss",
-            "https://weworkremotely.com/categories/remote-customer-support-jobs.rss",
-        ]
+        urls = [u.strip() for u in settings.jobs_weworkremotely_urls.split("|") if u.strip()]
         try:
             for url in urls:
                 try:
@@ -323,7 +322,7 @@ class JobsCrawler(AsyncBaseCrawler):
     async def fetch_yc_hn_jobs(self) -> List[JobRecord]:
         """Fetch and extract YC HN Who Is Hiring jobs with concurrent LLM extraction."""
         try:
-            entries = await self.fetch_feed("https://hnrss.org/whoishiring/jobs?q=AI")
+            entries = await self.fetch_feed(settings.jobs_hnrss_url)
             sem = asyncio.Semaphore(5)
             tasks = [self._process_yc_hn_entry(entry, sem) for entry in entries]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -338,24 +337,30 @@ class JobsCrawler(AsyncBaseCrawler):
     async def crawl(self) -> List[JobRecord]:
         """Crawl 5 AI job boards concurrently with 24h freshness enforcement."""
         logger.info("Starting JobsCrawler across 5 AI job boards...")
-        tasks = [
-            self.fetch_remoteok(),
-            self.fetch_arbeitnow(),
-            self.fetch_himalayas(),
-            self.fetch_weworkremotely(),
-            self.fetch_yc_hn_jobs(),
+        board_tasks = [
+            (self.fetch_remoteok(), "RemoteOK AI"),
+            (self.fetch_arbeitnow(), "Arbeitnow AI Jobs"),
+            (self.fetch_himalayas(), "Himalayas AI"),
+            (self.fetch_weworkremotely(), "WeWorkRemotely AI"),
+            (self.fetch_yc_hn_jobs(), "YC HN Who Is Hiring AI"),
         ]
-        batches = await asyncio.gather(*tasks, return_exceptions=True)
+        batches = await asyncio.gather(*[task for task, _ in board_tasks], return_exceptions=True)
         records = []
-        for batch in batches:
+        freshness = {}
+        for (_, source_name), batch in zip(board_tasks, batches):
             if isinstance(batch, Exception):
                 logger.warning(f"Job board fetch failed: {batch!r}")
+                freshness[source_name] = 0
             else:
                 records.extend(batch)
+                freshness[source_name] = len(batch)
 
         # Persist this run's keys for the next run's novelty heuristic.
         self._novelty_keys.update(rec.source.url for rec in records)
         save_seen_keys("jobs", self._novelty_keys)
+
+        # Per-source freshness stamps for staleness detection across runs.
+        save_source_freshness("jobs", freshness)
 
         logger.info(f"Completed JobsCrawler: {len(records)} fresh job postings (<24h) collected.")
         return records

@@ -4,9 +4,11 @@ Guarantees 0 list anchors, authentic product destination URLs, and grounded pric
 """
 
 import asyncio
+import json
 import re
 from typing import Dict, List, Optional, Tuple
 
+from src.config import settings
 from src.crawlers.base import TargetedCrawler
 from src.llm.fallback_chain import llm_engine
 from src.llm.prompts import PRODUCT_PRICING_PROMPT, ProductPricingSchema
@@ -49,6 +51,21 @@ class ProductsCrawler(TargetedCrawler):
 
     def __init__(self, target_count: int = 1000, **kwargs):
         super().__init__(target_count=target_count, **kwargs)
+
+    def _configured_sources(self) -> List[Tuple[str, str]]:
+        """Resolve product sources: PRODUCT_SOURCES_JSON override (list of [name, url])
+        or the built-in SOURCES table. Uses self.SOURCES so tests can patch it."""
+        override = settings._parse_json_list(settings.product_sources_json, [])
+        if override:
+            normalized = []
+            for s in override:
+                if isinstance(s, dict):
+                    normalized.append((s.get("name") or "", s.get("url") or ""))
+                elif isinstance(s, list) and len(s) >= 2:
+                    normalized.append((s[0], s[1]))
+            if normalized:
+                return normalized
+        return self.SOURCES
 
     @staticmethod
     def classify_pricing(name: str, url: str, desc: str) -> PricingModelEnum:
@@ -179,7 +196,10 @@ class ProductsCrawler(TargetedCrawler):
     async def crawl(self) -> List[ProductRecord]:
         """Collect 1,000+ unique AI products from clean curated markdown directories."""
         logger.info(f"Starting ProductsCrawler (Target: {self.target_count})...")
-        for src_name, url in self.SOURCES:
+        recovered = self.recover_from_wal(model_cls=ProductRecord)
+        if recovered:
+            logger.info(f"Resumed {recovered} products from WAL; continuing toward {self.target_count}.")
+        for src_name, url in self._configured_sources():
             if self.is_full:
                 break
             try:
@@ -197,7 +217,7 @@ class ProductsCrawler(TargetedCrawler):
                     if len(candidates) >= self.remaining:
                         break
 
-                sem = asyncio.Semaphore(15)
+                sem = asyncio.Semaphore(settings.products_concurrency)
                 tasks = [self._process_item(src_name, n, u, d, sem) for n, u, d in candidates]
                 records = await asyncio.gather(*tasks)
                 for rec in records:
@@ -208,5 +228,6 @@ class ProductsCrawler(TargetedCrawler):
             except Exception as exc:
                 logger.warning(f"Error crawling products from {src_name}: {repr(exc)}")
 
+        self.reset_wal_if_complete()
         logger.info(f"Completed ProductsCrawler: {len(self.collected)} products collected.")
         return self.collected[:self.target_count]
