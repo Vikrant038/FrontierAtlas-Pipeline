@@ -85,10 +85,12 @@ class StartupRecord(AuditedEntityRecord):
 
     def to_row(self) -> List[Any]:
         return [
-            self.content.entityName,
-            self.content.data.employeeCount or "N/A",
+            self.schemaVersion,
+            self.recordType,
             self.source.name,
             self.source.url,
+            self.content.entityName,
+            self.content.data.employeeCount if self.content.data.employeeCount is not None else "N/A",
             self.collectedAt.isoformat(),
         ]
 
@@ -110,6 +112,10 @@ class ProductRecord(AuditedEntityRecord):
     def to_row(self) -> List[Any]:
         pm = self.content.pricingModel
         return [
+            self.schemaVersion,
+            self.recordType,
+            self.source.name,
+            self.source.url,
             self.content.productName,
             self.content.startupName,
             str(pm.value if hasattr(pm, "value") else pm),
@@ -137,6 +143,8 @@ class ResearchPaperRecord(BaseEntityModel):
 
     def to_row(self) -> List[Any]:
         return [
+            self.schemaVersion,
+            self.recordType,
             self.content.title,
             ", ".join(self.content.authors),
             self.content.paper_url,
@@ -164,13 +172,16 @@ class JobRecord(AuditedEntityRecord):
     def to_row(self) -> List[Any]:
         rf = self.content.role_family
         return [
-            self.content.title,
-            self.content.company,
-            str(rf.value if hasattr(rf, "value") else rf),
-            "Yes" if self.content.is_remote else "No",
+            self.schemaVersion,
+            self.recordType,
             self.source.name,
             self.source.url,
+            self.content.company,
+            self.content.title,
             self.content.date.isoformat(),
+            self.content.is_remote,
+            str(rf.value if hasattr(rf, "value") else rf),
+            self.collectedAt.isoformat(),
         ]
 
 
@@ -190,11 +201,14 @@ class NewsRecord(AuditedEntityRecord):
 
     def to_row(self) -> List[Any]:
         return [
-            self.content.title,
+            self.schemaVersion,
+            self.recordType,
             self.source.name,
             self.source.url,
+            self.content.title,
             self.content.published_date.isoformat(),
             self.content.summary or (self.content.full_text[:200] + "..."),
+            self.collectedAt.isoformat(),
         ]
 
 

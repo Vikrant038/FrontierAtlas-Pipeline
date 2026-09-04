@@ -46,11 +46,17 @@ class CSVExporter:
     def export_news(self, records: List[NewsRecord], filename: str = "news.csv") -> str:
         return self._write_csv(filename, ENTITY_SPECS["news"][2], records)
 
-    def export_logs(self, records: List[EntityResolutionLog], filename: str = "entity_resolution_logs.csv") -> str:
-        return self._write_csv(filename, ENTITY_SPECS["logs"][2], records)
+    def export_logs(self, records: List[EntityResolutionLog], filename: str = "entity_mapping_log.csv") -> str:
+        filepath = self._write_csv(filename, ENTITY_SPECS["logs"][2], records)
+        if filename == "entity_mapping_log.csv":
+            self._write_csv("entity_resolution_logs.csv", ENTITY_SPECS["logs"][2], records)
+        return filepath
 
     def export_all(self, **datasets) -> Dict[str, str]:
-        return {
+        res = {
             key: self._write_csv(filename, headers, datasets.get(key))
             for key, (_, filename, headers) in ENTITY_SPECS.items()
         }
+        if "logs" in datasets and datasets["logs"]:
+            self._write_csv("entity_resolution_logs.csv", ENTITY_SPECS["logs"][2], datasets["logs"])
+        return res

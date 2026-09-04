@@ -43,11 +43,12 @@ def verify_phase1() -> None:
 
     # 1. Record Counts
     print("--- 1. Record Counts ---")
+    log_sheet_name = "Entity Mapping Log" if "Entity Mapping Log" in sheets else "Entity_Resolution_Log"
     min_targets = {
         "Startups": 100,
         "Products": 100,
         "Research_Papers": 100,
-        "Entity_Resolution_Log": 1,
+        log_sheet_name: 1,
     }
     for name, target in min_targets.items():
         count = len(sheets.get(name, []))
@@ -56,9 +57,9 @@ def verify_phase1() -> None:
     print()
 
     # 2. Entity Resolution Log Audit
-    if "Entity_Resolution_Log" in sheets:
-        print("--- 2. Entity Resolution Log Audit ---")
-        methods = Counter(str(r.get("Match Method", "UNKNOWN")) for r in sheets["Entity_Resolution_Log"])
+    if log_sheet_name in sheets:
+        print(f"--- 2. {log_sheet_name} Audit ---")
+        methods = Counter(str(r.get("matchMethod", r.get("Match Method", "UNKNOWN"))) for r in sheets[log_sheet_name])
         total = sum(methods.values())
         print(f"  Total Log Entries: {total}")
         for m, c in methods.most_common():
@@ -72,8 +73,8 @@ def verify_phase1() -> None:
     if "Research_Papers" in sheets:
         print("--- 3. Research Papers GitHub Correlation ---")
         papers = sheets["Research_Papers"]
-        gh_matches = sum(1 for p in papers if p.get("GitHub Repo") and str(p.get("GitHub Repo")) != "None")
-        stars_matches = sum(1 for p in papers if isinstance(p.get("GitHub Stars"), (int, float)) and p["GitHub Stars"] > 0)
+        gh_matches = sum(1 for p in papers if (p.get("content.github_url") or p.get("GitHub Repo")) and str(p.get("content.github_url") or p.get("GitHub Repo")) != "None")
+        stars_matches = sum(1 for p in papers if isinstance(p.get("content.github_stars", p.get("GitHub Stars")), (int, float)) and (p.get("content.github_stars", p.get("GitHub Stars")) or 0) > 0)
         rate = (gh_matches / len(papers) * 100) if papers else 0
         print(f"  Total Papers        : {len(papers)}")
         print(f"  Papers with GitHub  : {gh_matches} ({rate:.1f}% hit-rate)")
@@ -83,20 +84,23 @@ def verify_phase1() -> None:
     # 4. Spot-Checks (5 random per sheet)
     print("--- 4. Random Spot-Checks (5 per sheet) ---")
     field_maps = {
-        "Startups": ("Canonical Entity Name", "Source URL", "Collected At"),
-        "Products": ("Product Name", "Product URL", "Collected At"),
-        "Research_Papers": ("Title", "Paper URL", "Published Date"),
+        "Startups": (("content.entityName", "Canonical Entity Name"), ("source.url", "Source URL"), ("collectedAt", "Collected At")),
+        "Products": (("content.productName", "Product Name"), ("content.productUrl", "Product URL"), ("collectedAt", "Collected At")),
+        "Research_Papers": (("content.title", "Title"), ("content.paper_url", "Paper URL"), ("content.published_date", "Published Date")),
     }
 
-    for name, (name_key, url_key, date_key) in field_maps.items():
+    for name, (name_keys, url_keys, date_keys) in field_maps.items():
         records = sheets.get(name, [])
         if not records:
             continue
         print(f"  [{name}] (Sample of {min(5, len(records))} rows):")
         for r in random.sample(records, min(5, len(records))):
-            title = str(r.get(name_key) or "N/A")[:32]
-            url = str(r.get(url_key) or "N/A")
-            raw_date = str(r.get(date_key) or "N/A")
+            name_val = next((r[k] for k in name_keys if k in r and r[k] is not None), "N/A")
+            url_val = next((r[k] for k in url_keys if k in r and r[k] is not None), "N/A")
+            raw_date = str(next((r[k] for k in date_keys if k in r and r[k] is not None), "N/A"))
+
+            title = str(name_val)[:32]
+            url = str(url_val)
 
             date_ok = "Valid UTC"
             try:

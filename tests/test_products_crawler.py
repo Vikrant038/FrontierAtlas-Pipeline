@@ -14,11 +14,12 @@ from src.schemas.entities import PricingModelEnum
 
 def test_products_crawler_pricing_classification():
     # Arrange & Act & Assert
-    assert ProductsCrawler._classify_pricing("Custom pricing for enterprise teams") == PricingModelEnum.ENTERPRISE
-    assert ProductsCrawler._classify_pricing("Open source tool licensed under MIT") == PricingModelEnum.FREE
-    assert ProductsCrawler._classify_pricing("Plans start at $20/mo subscription") == PricingModelEnum.PAID
-    assert ProductsCrawler._classify_pricing("Free tier available with upgrades") == PricingModelEnum.FREE
-    assert ProductsCrawler._classify_pricing("Cloud hosted AI copilot") == PricingModelEnum.FREEMIUM
+    assert ProductsCrawler.classify_pricing("Custom", "https://custom.com", "Custom pricing for enterprise teams") == PricingModelEnum.ENTERPRISE
+    assert ProductsCrawler.classify_pricing("Tool", "https://tool.com", "Open source tool licensed under MIT") == PricingModelEnum.FREE
+    assert ProductsCrawler.classify_pricing("Plan", "https://plan.com", "Plans start at $20/mo subscription") == PricingModelEnum.PAID
+    assert ProductsCrawler.classify_pricing("App", "https://app.com", "Free tier available with upgrades") == PricingModelEnum.FREEMIUM
+    assert ProductsCrawler.classify_pricing("GitHub Tool", "https://github.com/org/repo", "Cloud hosted AI copilot") == PricingModelEnum.FREE
+    assert ProductsCrawler.classify_pricing("OpenAI API", "https://openai.com/api/", "Developer API platform") == PricingModelEnum.PAID
 
 
 def test_products_crawler_maker_extraction():
@@ -62,15 +63,27 @@ async def test_products_crawler_markdown_parsing_sections():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_products_parser_against_real_ai_collection_fixture():
+async def test_awesome_ai_agents_header_parsing():
     # Arrange
-    fixture_path = Path(__file__).parent / "fixtures" / "ai_collection_snapshot.md"
-    content = fixture_path.read_text(encoding="utf-8")
+    sample_agents = """# Awesome AI Agents
+## [AgentForge](https://github.com/DataBassGit/AgentForge)
+LLM-agnostic platform for agent building & testing
 
-    crawler = ProductsCrawler(target_count=10)
-    crawler.SOURCES = [("AI Collection Fixture", "https://raw.githubusercontent.com/ai-collection/ai-collection/main/README.md")]
-    respx.get("https://raw.githubusercontent.com/ai-collection/ai-collection/main/README.md").mock(
-        return_value=httpx.Response(200, text=content)
+<details>
+### Description
+- A low-code framework for autonomous agents.
+### Links
+- [GitHub](https://github.com/DataBassGit/AgentForge)
+- [Web](https://www.agentforge.net/)
+</details>
+
+## [AgentGPT](https://agentgpt.reworkd.ai/)
+Browser-based autonomous agent
+"""
+    crawler = ProductsCrawler(target_count=2)
+    crawler.SOURCES = [("Awesome AI Agents", "https://raw.githubusercontent.com/e2b-dev/awesome-ai-agents/main/README.md")]
+    respx.get("https://raw.githubusercontent.com/e2b-dev/awesome-ai-agents/main/README.md").mock(
+        return_value=httpx.Response(200, text=sample_agents)
     )
 
     # Act
@@ -78,19 +91,8 @@ async def test_products_parser_against_real_ai_collection_fixture():
     await crawler.close()
 
     # Assert
-    assert len(products) == 4
-    names = [p.content.productName for p in products]
-    assert "GPT-Zero" in names
-    assert "Stable Diffusion XL" in names
-    assert "Claude Enterprise" in names
-    assert "Jasper AI" in names
-
-    # Verify pricing model classifications
-    sd_xl = next(p for p in products if p.content.productName == "Stable Diffusion XL")
-    assert sd_xl.content.pricingModel == PricingModelEnum.FREE
-
-    claude = next(p for p in products if p.content.productName == "Claude Enterprise")
-    assert claude.content.pricingModel == PricingModelEnum.ENTERPRISE
-
-    jasper = next(p for p in products if p.content.productName == "Jasper AI")
-    assert jasper.content.pricingModel == PricingModelEnum.PAID
+    assert len(products) == 2
+    assert products[0].content.productName == "AgentForge"
+    assert products[0].content.productUrl == "https://www.agentforge.net/"
+    assert products[1].content.productName == "AgentGPT"
+    assert products[1].content.productUrl == "https://agentgpt.reworkd.ai/"

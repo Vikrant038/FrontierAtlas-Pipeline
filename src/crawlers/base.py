@@ -115,15 +115,17 @@ class AsyncBaseCrawler(ABC):
         url: str,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
     ) -> httpx.Response:
         """Core HTTP request with SSRF validation, semaphore bounds, and retry backoff."""
         safe_url = validate_url_safe(url)
         client = await self.get_client()
         req_headers = {**self.headers, **(headers or {})}
+        req_timeout = timeout if timeout is not None else self.timeout
 
         async with self.semaphore:
             try:
-                resp = await client.get(safe_url, params=params, headers=req_headers)
+                resp = await client.get(safe_url, params=params, headers=req_headers, timeout=req_timeout)
                 if resp.status_code == 403:
                     raise BotBlockedError(f"HTTP 403 for {safe_url}")
                 if resp.status_code in (429, 500, 502, 503, 504):
@@ -133,12 +135,18 @@ class AsyncBaseCrawler(ABC):
                 resp.raise_for_status()
                 return resp
             except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError) as net_err:
-                raise TransientNetworkError(str(net_err)) from net_err
+                raise TransientNetworkError(repr(net_err)) from net_err
 
-    async def fetch(self, url: str, params: Optional[Dict[str, Any]] = None) -> str:
+    async def fetch(
+        self,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
         """Fetch URL content as text string; escalates to TLS impersonation on 403 anti-bot blocks."""
         try:
-            return (await self._request(url, params=params)).text
+            return (await self._request(url, params=params, headers=headers, timeout=timeout)).text
         except BotBlockedError:
             logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
             return await self.fetch_tls(url, params=params)
@@ -148,11 +156,12 @@ class AsyncBaseCrawler(ABC):
         url: str,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
         allow_tls_fallback: bool = True,
     ) -> Any:
         """Fetch URL and return parsed JSON; escalates to TLS impersonation on 403 anti-bot blocks."""
         try:
-            return (await self._request(url, params=params, headers=headers)).json()
+            return (await self._request(url, params=params, headers=headers, timeout=timeout)).json()
         except BotBlockedError:
             if not allow_tls_fallback:
                 raise
