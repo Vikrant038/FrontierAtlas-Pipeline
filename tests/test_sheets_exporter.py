@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.exporters.base import ENTITY_SPECS
-from src.exporters.sheets_exporter import GoogleSheetsExporter, BATCH_SIZE
+from src.exporters.sheets_exporter import GoogleSheetsExporter
 from src.schemas.entities import (
     PricingModelEnum,
     ProductContent,
@@ -241,7 +241,6 @@ def test_transient_sheets_error_detection():
 def test_execute_values_update_retries_on_transient_error(tmp_path, monkeypatch):
     # Arrange
     from tenacity import wait_none
-    import src.exporters.sheets_exporter as se
     import gspread
 
     class FakeResponse:

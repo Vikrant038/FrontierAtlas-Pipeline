@@ -1,7 +1,8 @@
 import asyncio
+import time
 from typing import AsyncIterator, List, Optional
 
-from src.crawlers.base import TargetedCrawler, github_headers
+from src.crawlers.base import TargetedCrawler, github_headers, is_github_quota_error
 from src.schemas.entities import SourceMetadata, StartupContent, StartupContentData, StartupRecord
 from src.resolution.normalizer import entity_resolver
 from src.utils.logger import logger
@@ -31,6 +32,11 @@ class StartupsCrawler(TargetedCrawler):
 
     def __init__(self, target_count: int = 1000, **kwargs):
         super().__init__(target_count=target_count, **kwargs)
+        self._github_quota_blocked_until: float = 0.0
+
+    def _github_blocked(self) -> bool:
+        """True while the one-hour GitHub quota backoff window is active."""
+        return time.monotonic() < self._github_quota_blocked_until
 
     async def _add_startup(
         self, raw_name: Optional[str], src_name: str, src_url: str, employee_count: Optional[int] = None
@@ -104,15 +110,24 @@ class StartupsCrawler(TargetedCrawler):
     async def _github_candidates(self) -> AsyncIterator[tuple]:
         """Yield (name, source, url, employee_count) candidates from GitHub AI org search."""
         for query in self.SEARCH_QUERIES:
+            if self._github_blocked():
+                break
             for page in range(1, 11):
                 try:
                     data = await self.fetch_json(
                         self.GITHUB_USERS_API,
                         params={"q": query, "per_page": 100, "page": page},
                         headers=github_headers(self.github_token),
+                        allow_tls_fallback=False,
                     )
                 except Exception as exc:
                     logger.warning(f"Error fetching GitHub orgs for '{query}' (page {page}): {exc}")
+                    if is_github_quota_error(exc):
+                        # GitHub search API quota exhausted: stop scanning rather than
+                        # burning 27 doomed requests (and browser escalations).
+                        self._github_quota_blocked_until = time.monotonic() + 3600.0
+                        logger.warning("GitHub search quota exhausted; stopping GitHub org scan for an hour.")
+                        break
                     continue
                 items = (data or {}).get("items", [])
                 if not items:

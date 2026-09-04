@@ -45,7 +45,7 @@ async def test_fetch_stars_403_quota_message_disables_enrichment():
             text="API rate limit exceeded",
         )
     )
-    assert crawler._github_quota_exhausted is False
+    assert crawler._github_quota_blocked() is False
 
     # Act
     repo_url, stars = await crawler._fetch_stars("some-org/some-repo")
@@ -53,7 +53,7 @@ async def test_fetch_stars_403_quota_message_disables_enrichment():
     # Assert - failure logged via record, quota flag flips for subsequent calls
     assert repo_url == "https://github.com/some-org/some-repo"
     assert stars is None
-    assert crawler._github_quota_exhausted is True
+    assert crawler._github_quota_blocked() is True
 
     # Subsequent calls short-circuit without hitting the API again
     respx.get("https://api.github.com/repos/other-org/other-repo").mock(
@@ -78,5 +78,5 @@ async def test_fetch_stars_plain_404_does_not_disable_enrichment():
 
     # Assert - repo not found is normal, quota stays active
     assert stars is None
-    assert crawler._github_quota_exhausted is False
+    assert crawler._github_quota_blocked() is False
     await crawler.close()

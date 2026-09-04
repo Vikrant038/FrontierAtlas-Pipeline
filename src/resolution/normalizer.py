@@ -97,20 +97,27 @@ class EntityResolver:
         self.domain_map.update(cached_registry.get("domains", {}))
 
     def save_cache(self) -> None:
-        """Persist dynamically learned entities and domain grounding registry to disk."""
+        """Persist dynamically learned entities and domain grounding registry to disk (atomic replace)."""
         try:
             os.makedirs(os.path.dirname(os.path.abspath(self.cache_path)), exist_ok=True)
-            with open(self.cache_path, "w", encoding="utf-8") as cache_file:
+            tmp_path = f"{self.cache_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as cache_file:
                 json.dump({
                     "entities": sorted(list(self.canonical_entities)),
                     "domains": self.domain_map
                 }, cache_file, indent=2)
+            os.replace(tmp_path, self.cache_path)
             logger.info(
                 f"Canonical registry persisted: {len(self.canonical_entities)} entities, "
                 f"{len(self.domain_map)} grounded domains -> {self.cache_path}"
             )
         except OSError as cache_exc:
             logger.error(f"Failed to persist canonical registry to {self.cache_path}: {cache_exc}")
+
+    def _prepare(self, raw_name: str, source_url: str) -> Tuple[str, str, str, str]:
+        """Normalize inputs shared by the sync and async resolution paths."""
+        cleaned = (raw_name or "").strip()
+        return cleaned, cleaned.lower(), normalize_string_tier1(cleaned), extract_domain(source_url)
 
     def _check_deterministic_tiers(
         self,
@@ -228,11 +235,7 @@ class EntityResolver:
         entity_type: str = "STARTUP",
     ) -> Tuple[str, EntityResolutionLog]:
         """Asynchronous entity resolution entrypoint with Tier 3 LLM fallback."""
-        cleaned = (raw_name or "").strip()
-        lower_cleaned = cleaned.lower()
-        normalized = normalize_string_tier1(cleaned)
-        domain = extract_domain(source_url)
-
+        cleaned, lower_cleaned, normalized, domain = self._prepare(raw_name, source_url)
         det_result, top_matches = self._check_deterministic_tiers(cleaned, lower_cleaned, normalized, domain)
         if det_result is not None:
             canonical, method, conf = det_result
@@ -251,11 +254,7 @@ class EntityResolver:
         entity_type: str = "STARTUP",
     ) -> Tuple[str, EntityResolutionLog]:
         """Synchronous entity resolution entrypoint with zero-overhead fast-path."""
-        cleaned = (raw_name or "").strip()
-        lower_cleaned = cleaned.lower()
-        normalized = normalize_string_tier1(cleaned)
-        domain = extract_domain(source_url)
-
+        cleaned, lower_cleaned, normalized, domain = self._prepare(raw_name, source_url)
         det_result, top_matches = self._check_deterministic_tiers(cleaned, lower_cleaned, normalized, domain)
         if det_result is not None:
             canonical, method, conf = det_result

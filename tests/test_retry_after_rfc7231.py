@@ -4,7 +4,6 @@ Follows AAA pattern per CODING_STANDARDS.md Pillar 7.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 import pytest
 from freezegun import freeze_time

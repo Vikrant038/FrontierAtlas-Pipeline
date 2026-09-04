@@ -5,7 +5,7 @@ Supports executing individual phases or running the end-to-end extraction and ex
 
 import asyncio
 import signal
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 import click
 from rich.console import Console
 from rich.table import Table
@@ -30,6 +30,22 @@ async def _crawl(crawler_cls, **kwargs):
     """Execute a crawler safely within an async context manager for connection cleanup."""
     async with crawler_cls(**kwargs) as crawler:
         return await crawler.crawl()
+
+
+async def _safe_gather(tasks) -> List[list]:
+    """Run crawler tasks concurrently; a failing crawler logs and yields [] instead of aborting the pipeline.
+    Cancellation is re-raised so the graceful-shutdown path (cache save -> re-raise -> clean exit) still runs."""
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    cleaned = []
+    for r in results:
+        if isinstance(r, asyncio.CancelledError):
+            raise r
+        if isinstance(r, Exception):
+            logger.error(f"Crawler failed: {r!r}")
+            cleaned.append([])
+        else:
+            cleaned.append(r)
+    return cleaned
 
 
 def _display_llm_telemetry() -> dict:
@@ -151,13 +167,13 @@ async def run_pipeline(
             ]
 
         if phase1_tasks and phase2_tasks:
-            results = await asyncio.gather(*phase1_tasks, *phase2_tasks)
+            results = await _safe_gather([*phase1_tasks, *phase2_tasks])
             papers, startups, products = results[0], results[1], results[2]
             news, jobs = results[3], results[4]
         elif phase1_tasks:
-            papers, startups, products = await asyncio.gather(*phase1_tasks)
+            papers, startups, products = await _safe_gather(phase1_tasks)
         elif phase2_tasks:
-            news, jobs = await asyncio.gather(*phase2_tasks)
+            news, jobs = await _safe_gather(phase2_tasks)
 
     except asyncio.CancelledError:
         console.print("[yellow]Pipeline execution interrupted. Saving entity cache and exiting...[/yellow]")
@@ -215,12 +231,22 @@ async def run_pipeline(
     table.add_column("Count Collected", style="magenta")
     table.add_column("Status", style="green")
 
+    def _phase1_status(count: int) -> str:
+        if not run_phase1:
+            return "— (skipped)"
+        return "✅ Complete" if count >= target_count else f"⚠️ Shortfall ({count}/{target_count})"
+
+    def _phase2_status(count: int) -> str:
+        if not run_phase2:
+            return "— (skipped)"
+        return "✅ Complete (<24h)" if count > 0 else "⚠️ No fresh items"
+
     rows = [
-        ("Startups (Phase I)", len(startups), "✅ Complete"),
-        ("Products (Phase I)", len(products), "✅ Complete"),
-        ("Research Papers (Phase I)", len(papers), "✅ Complete"),
-        ("Fresh News Articles (Phase II)", len(news), "✅ Complete (<24h)"),
-        ("Fresh Job Postings (Phase II)", len(jobs), "✅ Complete (<24h)"),
+        ("Startups (Phase I)", len(startups), _phase1_status(len(startups))),
+        ("Products (Phase I)", len(products), _phase1_status(len(products))),
+        ("Research Papers (Phase I)", len(papers), _phase1_status(len(papers))),
+        ("Fresh News Articles (Phase II)", len(news), _phase2_status(len(news))),
+        ("Fresh Job Postings (Phase II)", len(jobs), _phase2_status(len(jobs))),
         ("Knowledge Graph Nodes", metrics["total_nodes"], "✅ Connected"),
         ("Knowledge Graph Edges", metrics["total_edges"], "✅ Connected"),
     ]
@@ -242,6 +268,11 @@ async def run_pipeline(
             logs=logs,
         )
 
+    shortfall = run_phase1 and any(len(x) < target_count for x in (startups, products, papers))
+    if shortfall:
+        console.print("[bold red]⚠️  Phase I target shortfall detected; exit code will be 1.[/bold red]")
+    return not shortfall
+
 
 DEFAULT_OUTPUT_XLSX = "exports/FrontierAtlas_Intelligence.xlsx"
 PHASE1_OUTPUT_XLSX = "exports/phase1_test.xlsx"
@@ -260,7 +291,7 @@ def main(phase: str, target: int, output: str, sheets: bool):
     # Default output aligns with scripts/verify_phase1.py expectations per phase.
     output_xlsx = output or (PHASE1_OUTPUT_XLSX if phase == "1" else DEFAULT_OUTPUT_XLSX)
     try:
-        asyncio.run(
+        success = asyncio.run(
             run_pipeline(
                 run_phase1=run_phase1,
                 run_phase2=run_phase2,
@@ -271,6 +302,9 @@ def main(phase: str, target: int, output: str, sheets: bool):
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[bold yellow]Pipeline stopped gracefully. State and cache preserved.[/bold yellow]")
+        return
+    if not success:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

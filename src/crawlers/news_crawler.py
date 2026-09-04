@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -96,6 +98,14 @@ class NewsCrawler(AsyncBaseCrawler):
         cleaned = re.sub(r"[^\w\s]", " ", cleaned)
         return " ".join(cleaned.split())
 
+    @staticmethod
+    def _is_duplicate_title(norm_title: str, seen_titles: List[str]) -> Optional[Tuple[str, float]]:
+        """Return (matched_title, score) if norm_title fuzzy-matches a seen title, else None."""
+        if not seen_titles:
+            return None
+        match = process.extractOne(norm_title, seen_titles, scorer=fuzz.token_sort_ratio, score_cutoff=90.0)
+        return (match[0], match[1]) if match else None
+
     async def _fetch_full_text(
         self, source_name: str, entry: Any, link: str, title: str
     ) -> Tuple[str, bool, str]:
@@ -167,8 +177,8 @@ class NewsCrawler(AsyncBaseCrawler):
             self._seen_titles.remove(title)
 
     async def _process_entry(self, entry: Any, source_name: str) -> Optional[NewsRecord]:
-        title = getattr(entry, "title", "").strip()
-        link = getattr(entry, "link", "").strip()
+        title = (getattr(entry, "title", "") or "").strip()
+        link = (getattr(entry, "link", "") or "").strip()
         if not title or not link or "news.ycombinator.com" in link:
             return None
 
@@ -177,11 +187,10 @@ class NewsCrawler(AsyncBaseCrawler):
             return None
 
         norm_title = self._normalize_title(title)
-        if self._seen_titles:
-            match = process.extractOne(norm_title, self._seen_titles, scorer=fuzz.token_sort_ratio, score_cutoff=90.0)
-            if match:
-                logger.info(f"Duplicate news title skipped: '{title}' ({match[1]:.1f}% match with '{match[0]}')")
-                return None
+        match = self._is_duplicate_title(norm_title, self._seen_titles)
+        if match:
+            logger.info(f"Duplicate news title skipped: '{title}' ({match[1]:.1f}% match with '{match[0]}')")
+            return None
 
         # Fast freshness pre-check: skip network fetch if explicit feed date fails 24h gate
         raw_feed_date = getattr(entry, "published", None) or getattr(entry, "updated", None)
@@ -247,6 +256,9 @@ class NewsCrawler(AsyncBaseCrawler):
             entries = await self.fetch_feed(src["feed_url"])
             tasks = [self._process_entry(e, src["name"]) for e in entries]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.warning(f"Entry processing failed in {src['name']}: {r!r}")
             return [r for r in results if isinstance(r, NewsRecord)]
         except Exception as exc:
             logger.warning(f"Error crawling {src['name']}: {exc}")
@@ -267,11 +279,10 @@ class NewsCrawler(AsyncBaseCrawler):
         final_seen_titles: List[str] = []
         for rec in records:
             nt = self._normalize_title(rec.content.title)
-            if final_seen_titles:
-                match = process.extractOne(nt, final_seen_titles, scorer=fuzz.token_sort_ratio, score_cutoff=90.0)
-                if match:
-                    logger.info(f"Post-gather duplicate title removed: '{rec.content.title}' ({match[1]:.1f}% match with '{match[0]}')")
-                    continue
+            match = self._is_duplicate_title(nt, final_seen_titles)
+            if match:
+                logger.info(f"Post-gather duplicate title removed: '{rec.content.title}' ({match[1]:.1f}% match with '{match[0]}')")
+                continue
             final_seen_titles.append(nt)
             deduped_records.append(rec)
 
@@ -287,10 +298,11 @@ class NewsCrawler(AsyncBaseCrawler):
 
         # Persist summary telemetry for audit and verification
         try:
-            import json, os
             os.makedirs("exports", exist_ok=True)
-            with open("exports/news_summary_telemetry.json", "w", encoding="utf-8") as f:
+            tmp_path = "exports/news_summary_telemetry.json.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self.stats, f, indent=2)
+            os.replace(tmp_path, "exports/news_summary_telemetry.json")
         except Exception as exc:
             logger.debug(f"Could not persist news summary telemetry: {exc}")
 

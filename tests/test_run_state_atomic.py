@@ -5,8 +5,6 @@ Verifies file locking, atomic rename, and race condition prevention (BUG-01).
 
 import concurrent.futures
 import json
-import os
-import pytest
 
 from src.utils.run_state import load_seen_keys, save_seen_keys
 

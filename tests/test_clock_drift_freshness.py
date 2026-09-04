@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from freezegun import freeze_time
 
 from src.utils.date_normalizer import (
-    MAX_CLOCK_DRIFT_HOURS,
     is_fresh_24h,
     validate_freshness_24h,
 )

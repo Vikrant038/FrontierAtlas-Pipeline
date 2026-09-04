@@ -3,7 +3,6 @@ Unit tests for strict prompts and extraction schemas (Phase III: 3A).
 Follows AAA pattern per CODING_STANDARDS.md.
 """
 
-import pytest
 from src.llm.prompts import (
     JOB_EXTRACTION_PROMPT,
     NEWS_SUMMARY_PROMPT,

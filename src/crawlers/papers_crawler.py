@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import feedparser
 
-from src.crawlers.base import BotBlockedError, TargetedCrawler, github_headers
+from src.crawlers.base import BotBlockedError, TargetedCrawler, github_headers, is_github_quota_error
 from src.schemas.entities import ResearchPaperContent, ResearchPaperRecord
 from src.utils.date_normalizer import parse_datetime_to_utc
 from src.utils.logger import logger
@@ -18,6 +18,23 @@ from src.utils.logger import logger
 GITHUB_URL_PATTERN = re.compile(r"https?://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
 
 GITHUB_MIN_REQUEST_INTERVAL_SECONDS = 2.1  # ~28 req/min, safely under 5,000/hr authenticated & 60/hr anonymous budgets
+
+
+def _paper_record(
+    title: str,
+    authors: List[str],
+    paper_url: str,
+    published_date: Any,
+    repo: Optional[str],
+) -> Dict[str, Any]:
+    """Build the shared paper record shape used by every acquisition source."""
+    return {
+        "title": title,
+        "authors": authors or ["AI Researcher"],
+        "paper_url": paper_url,
+        "published_date": published_date,
+        "abstract_repo": repo,
+    }
 
 
 class ResearchPapersCrawler(TargetedCrawler):
@@ -33,9 +50,18 @@ class ResearchPapersCrawler(TargetedCrawler):
         self._last_github_time: float = 0.0
         self._github_pace_lock = asyncio.Lock()
         self._use_cdn = False
-        # Sentinel disables star enrichment after quota exhaustion (prevents
-        # thousands of doomed requests in anonymous mode: 60 req/hr cap).
-        self._github_quota_exhausted: bool = False
+        # Sentinel backs off star enrichment for one hour after quota exhaustion
+        # (prevents thousands of doomed requests in anonymous mode: 60 req/hr cap).
+        self._github_quota_blocked_until: float = 0.0
+
+    def _github_quota_blocked(self) -> bool:
+        """True while the one-hour GitHub quota backoff window is active."""
+        return time.monotonic() < self._github_quota_blocked_until
+
+    def _disable_github_enrichment(self) -> None:
+        """Back off star enrichment for one hour on verified GitHub quota exhaustion."""
+        self._github_quota_blocked_until = time.monotonic() + 3600.0
+        logger.warning("GitHub API quota exhausted. Disabling star enrichment for the next hour.")
 
     @staticmethod
     def _seconds_until_slot(last_time: float, interval: float) -> float:
@@ -50,19 +76,12 @@ class ResearchPapersCrawler(TargetedCrawler):
             await asyncio.sleep(self._seconds_until_slot(self._last_github_time, GITHUB_MIN_REQUEST_INTERVAL_SECONDS))
             self._last_github_time = time.monotonic()
 
-    def _is_github_quota_exhaustion(self, exc: Exception) -> bool:
-        """Detect GitHub rate-limit exhaustion (HTTP 403/429 with quota headers or message)."""
-        exc_text = str(exc).lower()
-        return (
-            "403" in exc_text and ("rate limit" in exc_text or "quota" in exc_text)
-        ) or "429" in exc_text
-
     async def _fetch_stars(self, repo_path: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
         """GitHub repository and star lookup with pacing and quota-exhaustion shutdown."""
         if not repo_path:
             return None, None
-        if self._github_quota_exhausted:
-            logger.debug(f"GitHub quota exhausted; skipping star lookup for {repo_path}.")
+        if self._github_quota_blocked():
+            logger.debug(f"GitHub quota backoff active; skipping star lookup for {repo_path}.")
             return f"https://github.com/{repo_path}", None
 
         await self._pace_github()
@@ -75,17 +94,15 @@ class ResearchPapersCrawler(TargetedCrawler):
             )
             if data and "stargazers_count" in data:
                 return f"https://github.com/{repo_path}", data["stargazers_count"]
-        except BotBlockedError:
-            # GitHub signals quota exhaustion with HTTP 403; TLS retry cannot help here.
-            self._github_quota_exhausted = True
-            logger.warning("GitHub API quota exhausted (HTTP 403). Disabling star enrichment for remainder of this run.")
+        except BotBlockedError as exc:
+            if is_github_quota_error(exc):
+                self._disable_github_enrichment()
+            else:
+                logger.warning(f"GitHub 403 (not quota) for {repo_path}: {exc}")
         except Exception as exc:
             logger.warning(f"GitHub star lookup failed for {repo_path}: {exc}")
-            if self._is_github_quota_exhaustion(exc):
-                self._github_quota_exhausted = True
-                logger.warning(
-                    "GitHub API quota exhausted. Disabling star enrichment for remainder of this run."
-                )
+            if is_github_quota_error(exc):
+                self._disable_github_enrichment()
         return f"https://github.com/{repo_path}", None
 
     def _parse_feed_entry(self, entry: Any) -> Optional[Dict[str, Any]]:
@@ -98,7 +115,7 @@ class ResearchPapersCrawler(TargetedCrawler):
         raw_authors = [getattr(a, "name", "") for a in getattr(entry, "authors", [])]
         creator = getattr(entry, "creator", "") or getattr(entry, "dc_creator", "") or getattr(entry, "author", "")
         names_str = " ".join(raw_authors) if raw_authors else re.sub(r"<[^>]+>", "", creator)
-        authors = [a.strip() for a in re.split(r"[,;]", names_str) if a.strip()] or ["Arxiv Researcher"]
+        authors = [a.strip() for a in re.split(r"[,;]", names_str) if a.strip()]
 
         date_str = getattr(entry, "published", "") or getattr(entry, "updated", "") or getattr(entry, "pubDate", "")
         pub_date = parse_datetime_to_utc(date_str)
@@ -126,13 +143,7 @@ class ResearchPapersCrawler(TargetedCrawler):
                 paper_url = link.href
                 break
 
-        return {
-            "title": title,
-            "authors": authors,
-            "paper_url": paper_url,
-            "published_date": pub_date,
-            "abstract_repo": abstract_repo,
-        }
+        return _paper_record(title, authors, paper_url, pub_date, abstract_repo)
 
     def _collect_until_limit(
         self, candidates: Iterable[Optional[Dict[str, Any]]], limit: int
@@ -205,13 +216,10 @@ class ResearchPapersCrawler(TargetedCrawler):
                     continue
                 repo_raw = p.get("githubRepo") or ""
                 m = GITHUB_URL_PATTERN.search(repo_raw) if repo_raw else None
-                yield {
-                    "title": title,
-                    "authors": [a.get("name") for a in p.get("authors", []) if a.get("name")] or ["HF AI Researcher"],
-                    "paper_url": f"https://arxiv.org/abs/{arxiv_id}",
-                    "published_date": pub_date,
-                    "abstract_repo": m.group(1) if m else None,
-                }
+                authors = [a.get("name") for a in p.get("authors", []) if a.get("name")]
+                yield _paper_record(
+                    title, authors, f"https://arxiv.org/abs/{arxiv_id}", pub_date, m.group(1) if m else None
+                )
 
         return self._collect_until_limit(candidates(), limit)
 
@@ -236,15 +244,9 @@ class ResearchPapersCrawler(TargetedCrawler):
                 pub_date = parse_datetime_to_utc(w.get("publication_date"))
                 if not title or not loc or not pub_date:
                     continue
-                authors = [a.get("author", {}).get("display_name") for a in w.get("authorships", []) if a.get("author", {}).get("display_name")] or ["AI Researcher"]
+                authors = [a.get("author", {}).get("display_name") for a in w.get("authorships", []) if a.get("author", {}).get("display_name")]
                 gh_match = GITHUB_URL_PATTERN.search(f"{title} {loc}")
-                yield {
-                    "title": title,
-                    "authors": authors,
-                    "paper_url": loc,
-                    "published_date": pub_date,
-                    "abstract_repo": gh_match.group(1) if gh_match else None,
-                }
+                yield _paper_record(title, authors, loc, pub_date, gh_match.group(1) if gh_match else None)
 
         return self._collect_until_limit(candidates(), limit)
 
@@ -286,7 +288,7 @@ class ResearchPapersCrawler(TargetedCrawler):
     async def _enrich_batch(self, batch: List[Tuple[ResearchPaperRecord, str]]) -> None:
         """Enrich a batch of paper records with GitHub stars in background."""
         for rec, repo_path in batch:
-            if self._github_quota_exhausted:
+            if self._github_quota_blocked():
                 break
             try:
                 repo_url, stars = await self._fetch_stars(repo_path)
@@ -327,14 +329,20 @@ class ResearchPapersCrawler(TargetedCrawler):
                     break
 
             # 2. Asynchronously enrich GitHub stars in background without blocking paper ingestion
-            if batch_to_enrich and not self._github_quota_exhausted:
+            if batch_to_enrich and not self._github_quota_blocked():
                 enrich_task = asyncio.create_task(self._enrich_batch(batch_to_enrich))
                 enrich_tasks.append(enrich_task)
+                if len(enrich_tasks) >= 20:
+                    # Prune finished enrichment tasks without blocking ingestion.
+                    done, enrich_tasks = await asyncio.wait(enrich_tasks, timeout=0)
+                    for t in done:
+                        if not t.cancelled() and t.exception() is not None:
+                            logger.debug(f"Enrichment task failed: {t.exception()!r}")
 
             offset += len(papers)
             logger.info(
                 f"Papers progress: {len(self.collected)}/{self.target_count} collected"
-                f" (GitHub enrichment {'active' if not self._github_quota_exhausted else 'disabled: quota exhausted'})."
+                f" (GitHub enrichment {'active' if not self._github_quota_blocked() else 'disabled: quota backoff'})."
             )
 
         # 3. Finalize all pending background star enrichments before returning

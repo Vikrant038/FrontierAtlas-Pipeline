@@ -3,7 +3,6 @@ Unit tests for ProductsCrawler markdown repository parsing and pricing classific
 Follows AAA pattern with offline respx mocking per CODING_STANDARDS.md.
 """
 
-from pathlib import Path
 import pytest
 import respx
 import httpx

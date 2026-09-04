@@ -47,6 +47,16 @@ def github_headers(token: Optional[str]) -> Dict[str, str]:
     return headers
 
 
+def is_github_quota_error(exc: Exception) -> bool:
+    """True if a GitHub API exception signals rate-limit/quota exhaustion.
+    429 is always quota; 403 counts only when the body mentions rate limits or quota
+    (a plain 403 may be a blocked repo or a WAF rejection, which must not disable enrichment)."""
+    text = str(exc).lower()
+    if "429" in text:
+        return True
+    return "403" in text and ("rate limit" in text or "quota" in text)
+
+
 class TransientNetworkError(Exception):
     """Raised on 429, 500, 502, 503, 504, or network disconnects."""
     pass
@@ -169,7 +179,11 @@ class AsyncBaseCrawler(ABC):
             try:
                 resp = await client.get(safe_url, params=params, headers=req_headers, timeout=req_timeout)
                 if resp.status_code == 403:
-                    raise BotBlockedError(f"HTTP 403 for {safe_url}")
+                    try:
+                        body_hint = resp.text[:200]
+                    except Exception:
+                        body_hint = ""
+                    raise BotBlockedError(f"HTTP 403 for {safe_url}: {body_hint}")
                 if resp.status_code in (429, 500, 502, 503, 504):
                     if resp.status_code == 429:
                         await _handle_retry_after(resp.headers, safe_url)
@@ -190,7 +204,7 @@ class AsyncBaseCrawler(ABC):
         timeout: Optional[float] = None,
     ) -> Any:
         """Tier 3 fallback: Launch hardened headless browser to bypass Cloudflare/bot challenges."""
-        safe_url = validate_url_safe(url)
+        safe_url = await asyncio.to_thread(validate_url_safe, url)
         browser_timeout = float(timeout or 45.0)
         logger.info(f"Escalating to Tier 3 Camoufox headless browser for {safe_url} (timeout={browser_timeout}s)")
         try:
@@ -271,7 +285,7 @@ class AsyncBaseCrawler(ABC):
         timeout: Optional[float] = None,
     ) -> str:
         """Fetch using pooled curl-cffi with Chrome124 TLS fingerprint impersonation."""
-        safe_url = validate_url_safe(url)
+        safe_url = await asyncio.to_thread(validate_url_safe, url)
         req_timeout = int(timeout or self.timeout)
         async with self.semaphore:
             try:
@@ -424,6 +438,8 @@ class TargetedCrawler(AsyncBaseCrawler):
         try:
             with open(self.wal_path, "r", encoding="utf-8") as f:
                 for line in f:
+                    if self.is_full:
+                        break
                     line = line.strip()
                     if not line:
                         continue
@@ -450,8 +466,6 @@ class TargetedCrawler(AsyncBaseCrawler):
                         item = data
                     self.collected.append(item)
                     recovered_count += 1
-                    if self.is_full:
-                        break
             logger.info(f"Recovered {recovered_count} items from WAL ({self.wal_path}).")
         except Exception as exc:
             logger.error(f"Error recovering from WAL {self.wal_path}: {exc}")

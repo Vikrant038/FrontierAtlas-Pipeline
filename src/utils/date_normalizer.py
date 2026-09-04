@@ -77,7 +77,8 @@ def is_fresh_24h(
         logger.warning(f"Future timestamp rejected ({age_hours:.2f}h in future): {published_date}")
         return False, age_hours
 
-    return (-MAX_CLOCK_DRIFT_HOURS <= age_hours <= max_age_hours), age_hours
+    # Lower bound is guaranteed by the early return above; only the 24h ceiling remains.
+    return age_hours <= max_age_hours, age_hours
 
 
 def validate_freshness_24h(date_val: Any) -> Optional[datetime]:

@@ -76,6 +76,10 @@ class ExcelExporter:
             elif title not in wb.sheetnames:
                 self._add_sheet(wb, title, headers, records or [])
 
-        wb.save(filepath)
+        # Atomic save: write to a temp file and replace so a crash mid-save never
+        # corrupts the deliverable workbook.
+        tmp_path = f"{filepath}.tmp"
+        wb.save(tmp_path)
+        os.replace(tmp_path, filepath)
         logger.info(f"Generated 6-tab Excel workbook at {filepath}")
         return filepath

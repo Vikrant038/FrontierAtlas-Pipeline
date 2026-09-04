@@ -4,14 +4,11 @@ Follows AAA pattern per CODING_STANDARDS.md Pillar 7.
 """
 
 import json
-from pathlib import Path
 import pytest
-from pydantic import BaseModel
 
 from src.crawlers.base import TargetedCrawler
 from src.crawlers.papers_crawler import ResearchPapersCrawler
 from src.schemas.entities import (
-    ResearchPaperContent,
     ResearchPaperRecord,
     SourceMetadata,
     StartupContent,

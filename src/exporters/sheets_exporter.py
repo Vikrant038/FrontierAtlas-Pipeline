@@ -6,7 +6,7 @@ idempotent tab management, and evaluator sharing.
 """
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import gspread
 from tenacity import (
     retry,
@@ -30,6 +30,11 @@ from src.utils.logger import logger
 
 BATCH_SIZE = 500
 DEFAULT_SPREADSHEET_TITLE = "FrontierAtlas AI Intelligence"
+
+
+def _dims(num_rows: int, num_cols: int) -> Tuple[int, int]:
+    """Minimum worksheet dimensions (100 rows x 10 cols) for readable auto-resize."""
+    return max(num_rows, 100), max(num_cols, 10)
 
 
 def _is_transient_sheets_error(exc: BaseException) -> bool:
@@ -156,23 +161,21 @@ class GoogleSheetsExporter:
         if title in existing:
             ws = existing[title]
             ws.clear()
-            ws.resize(rows=max(num_rows, 100), cols=max(num_cols, 10))
+            rows, cols = _dims(num_rows, num_cols)
+            ws.resize(rows=rows, cols=cols)
             logger.debug(f"Cleared and resized existing worksheet '{title}'")
             return ws
 
+        rows, cols = _dims(num_rows, num_cols)
         try:
-            ws = spreadsheet.add_worksheet(
-                title=title,
-                rows=max(num_rows, 100),
-                cols=max(num_cols, 10),
-            )
+            ws = spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
             logger.debug(f"Created new worksheet '{title}'")
             return ws
         except Exception:
             # Handle potential concurrent creation collision
             ws = spreadsheet.worksheet(title)
             ws.clear()
-            ws.resize(rows=max(num_rows, 100), cols=max(num_cols, 10))
+            ws.resize(rows=rows, cols=cols)
             return ws
 
     @_SHEETS_RETRY

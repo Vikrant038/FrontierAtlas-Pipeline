@@ -16,6 +16,7 @@ Guarantees:
 import asyncio
 import json
 import re
+import time
 from typing import Any, Dict, Optional, Type, TypeVar
 from pydantic import BaseModel, ValidationError
 
@@ -67,6 +68,14 @@ def _clean_json_markdown(text: str) -> str:
     return t.strip()
 
 
+def _classify_provider_error(exc: Exception) -> Exception:
+    """Map provider exceptions to LLMRateLimitError or LLMTransientError."""
+    err_msg = str(exc).lower()
+    if "429" in err_msg or "quota" in err_msg or "rate_limit" in err_msg or "resource_exhausted" in err_msg:
+        return LLMRateLimitError(str(exc))
+    return LLMTransientError(str(exc))
+
+
 class MultiTierLLMEngine:
     """Production-grade LLM orchestrator with multi-provider failover and concurrency limits."""
 
@@ -74,7 +83,7 @@ class MultiTierLLMEngine:
         self._clients: Dict[str, Any] = {}
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._gemini_exhausted: bool = False
+        self._gemini_exhausted_until: float = 0.0
         self._groq_exhausted: bool = False
         self.tier_usage: Dict[str, int] = {
             "gemini": 0,
@@ -98,8 +107,8 @@ class MultiTierLLMEngine:
         """Tier 1: Google Gemini Flash using google-genai AsyncChat (AFC-recommended path)."""
         if not settings.gemini_api_key:
             raise LLMTransientError("Gemini API key is not configured.")
-        if self._gemini_exhausted:
-            raise LLMRateLimitError("Gemini API quota exhausted for this session.")
+        if self._gemini_exhausted_until > time.monotonic():
+            raise LLMRateLimitError("Gemini API quota exhausted; backoff active.")
         try:
             if "gemini" not in self._clients:
                 from google import genai
@@ -121,11 +130,11 @@ class MultiTierLLMEngine:
             )
             return response.text or "{}"
         except Exception as exc:
-            err_msg = str(exc).lower()
-            if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg:
-                self._gemini_exhausted = True
-                raise LLMRateLimitError(str(exc)) from exc
-            raise LLMTransientError(str(exc)) from exc
+            err = _classify_provider_error(exc)
+            if isinstance(err, LLMRateLimitError):
+                # 60s backoff: the RPM window resets, so Tier 1 recovers this run.
+                self._gemini_exhausted_until = time.monotonic() + 60.0
+            raise err from exc
 
     @_LLM_RETRY
     async def _call_openai_compat(
@@ -163,10 +172,7 @@ class MultiTierLLMEngine:
             )
             return completion.choices[0].message.content or "{}"
         except Exception as exc:
-            err_msg = str(exc).lower()
-            if "429" in err_msg or "rate_limit" in err_msg:
-                raise LLMRateLimitError(str(exc)) from exc
-            raise LLMTransientError(str(exc)) from exc
+            raise _classify_provider_error(exc) from exc
 
     def _deterministic_extract(self, raw_text: str, schema_cls: Type[BaseModel]) -> Dict[str, Any]:
         """Tier 4: Zero-API rule-based extractor delegating to shared classification rules."""

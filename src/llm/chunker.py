@@ -14,11 +14,6 @@ from src.utils.logger import logger
 _ENCODER = tiktoken.get_encoding("cl100k_base")
 
 
-def count_tokens(text: str) -> int:
-    """Pre-flight count tokens using cl100k_base tokenizer."""
-    return len(_ENCODER.encode(text)) if text else 0
-
-
 def clean_html_text(raw_html: str) -> str:
     """Extract clean readable text from HTML, discarding boilerplate and scripts."""
     if not raw_html:

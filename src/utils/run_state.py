@@ -8,7 +8,7 @@ key absent = new since last run.
 import json
 import os
 import tempfile
-from typing import Set
+from typing import Optional, Set
 
 
 from src.utils.logger import logger
@@ -16,29 +16,25 @@ from src.utils.logger import logger
 STATE_PATH = os.path.join("exports", "run_state.json")
 
 
-def load_seen_keys(crawler_name: str, state_path: str = STATE_PATH) -> Set[str]:
-    """Load the seen-key set recorded by the previous run for this crawler."""
-    if not os.path.exists(state_path):
-        return set()
-    try:
-        with open(state_path, "r", encoding="utf-8") as state_file:
-            state = json.load(state_file)
-        return set(state.get(crawler_name, []))
-    except (json.JSONDecodeError, OSError) as state_exc:
-        logger.warning(f"Run state unreadable ({state_exc}); novelty heuristic disabled for {crawler_name}.")
-        return set()
-
-
-def _read_state_locked(state_path: str) -> dict:
-    """Helper to safely read current state under an active lock."""
+def _read_state(state_path: str) -> Optional[dict]:
+    """Read and parse run-state JSON. Returns {} when absent, None when corrupt."""
     if not os.path.exists(state_path):
         return {}
     try:
         with open(state_path, "r", encoding="utf-8") as state_file:
             data = json.load(state_file)
-            return data if isinstance(data, dict) else {}
+            return data if isinstance(data, dict) else None
     except (json.JSONDecodeError, OSError):
-        return {}
+        return None
+
+
+def load_seen_keys(crawler_name: str, state_path: str = STATE_PATH) -> Set[str]:
+    """Load the seen-key set recorded by the previous run for this crawler."""
+    state = _read_state(state_path)
+    if state is None:
+        logger.warning(f"Run state unreadable; novelty heuristic disabled for {crawler_name}.")
+        return set()
+    return set(state.get(crawler_name, []))
 
 
 def save_seen_keys(crawler_name: str, seen_keys: Set[str], state_path: str = STATE_PATH) -> None:
@@ -62,7 +58,7 @@ def save_seen_keys(crawler_name: str, seen_keys: Set[str], state_path: str = STA
             if has_fcntl:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
-                state = _read_state_locked(state_path)
+                state = _read_state(state_path) or {}
                 state[crawler_name] = sorted(list(seen_keys))
 
                 temp_fd, temp_path = tempfile.mkstemp(dir=export_dir, prefix="run_state_", suffix=".tmp")

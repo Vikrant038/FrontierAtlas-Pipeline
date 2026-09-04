@@ -22,12 +22,16 @@ class CSVExporter:
         os.makedirs(self.output_dir, exist_ok=True)
 
     def _write_csv(self, filename: str, headers: List[str], records: Optional[List]) -> str:
+        # Write to a temp file and atomically replace so a crash mid-export never
+        # leaves a truncated deliverable CSV (same pattern as run_state persistence).
         filepath = os.path.join(self.output_dir, filename)
-        with open(filepath, "w", newline="", encoding="utf-8") as f:
+        tmp_path = f"{filepath}.tmp"
+        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(headers)
             for r in (records or []):
                 writer.writerow(r.to_row() if hasattr(r, "to_row") else r)
+        os.replace(tmp_path, filepath)
         logger.info(f"Exported {len(records or [])} records to {filepath}")
         return filepath
 
