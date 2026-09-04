@@ -87,3 +87,37 @@ async def test_startups_crawler_hf_and_github_orgs():
     names = [s.content.entityName for s in startups]
     assert "meta-llama" in names
     assert "Mistral AI" in names
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_startups_crawler_yc_page_error_resilience():
+    # Arrange: Page 1 yields 1 company, page 2 errors (500), page 3 yields 1 company
+    crawler = StartupsCrawler(target_count=2)
+    crawler.CANONICAL_SEEDS = []
+
+    respx.get("https://api.ycombinator.com/v0.1/companies?category=artificial_intelligence&page=1").mock(
+        return_value=httpx.Response(200, json={"companies": [{"name": "Startup Alpha", "website": "https://alpha.ai"}]})
+    )
+    respx.get("https://api.ycombinator.com/v0.1/companies?category=artificial_intelligence&page=2").mock(
+        return_value=httpx.Response(500)
+    )
+    respx.get("https://api.ycombinator.com/v0.1/companies?category=artificial_intelligence&page=3").mock(
+        return_value=httpx.Response(200, json={"companies": [{"name": "Startup Gamma", "website": "https://gamma.ai"}]})
+    )
+    respx.get("https://api.ycombinator.com/v0.1/companies?category=artificial_intelligence&page=4").mock(
+        return_value=httpx.Response(200, json={"companies": []})
+    )
+    respx.get("https://api.ycombinator.com/v0.1/companies?category=artificial_intelligence&page=5").mock(
+        return_value=httpx.Response(200, json={"companies": []})
+    )
+
+    # Act
+    startups = await crawler.crawl()
+    await crawler.close()
+
+    # Assert: Page 2 500 did not abort the crawl; Startup Gamma on page 3 was collected
+    assert len(startups) == 2
+    names = [s.content.entityName for s in startups]
+    assert "Startup Alpha" in names
+    assert "Startup Gamma" in names

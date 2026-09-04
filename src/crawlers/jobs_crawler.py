@@ -253,71 +253,74 @@ class JobsCrawler(AsyncBaseCrawler):
             logger.warning(f"WeWorkRemotely fetch error: {exc}")
         return records
 
+    async def _process_yc_hn_entry(self, entry: Any, sem: asyncio.Semaphore) -> Optional[JobRecord]:
+        """Process a single YC HN job entry with optional LLM extraction."""
+        desc = getattr(entry, "summary", "") or getattr(entry, "description", "")
+        clean_desc = re.sub(r"<[^>]+>", "", desc).strip()
+        first_line = clean_desc.split("\n")[0].strip() if clean_desc else ""
+        if "|" in first_line:
+            parts = [p.strip() for p in first_line.split("|")]
+            company = parts[0]
+            title = parts[1] if len(parts) > 1 else first_line
+            loc = parts[2] if len(parts) > 2 else ""
+        elif "is the" in first_line:
+            company = first_line.split("is the")[0].strip()
+            title = first_line[:100]
+            loc = ""
+        else:
+            company = getattr(entry, "author", "") or "AI Startup"
+            title = first_line[:100]
+            loc = ""
+        if not AI_KEYWORD_PATTERN.search(title):
+            return None
+        raw_date = getattr(entry, "published", None)
+        if not self.check_freshness(raw_date):
+            return None
+        apply_urls = re.findall(r'https?://[^\s<>"\'\)]+', desc)
+        apply_url = next(
+            (u for u in apply_urls if not any(d in u for d in ("ycombinator.com", "hnrss.org", "w3.org"))),
+            getattr(entry, "link", ""),
+        )
+        is_remote = self._is_remote(location=loc, title=title)
+        role_fam = classify_role_family(title)
+
+        if len(clean_desc) >= 40:
+            async with sem:
+                try:
+                    input_text = f"Job Title: {title}\nLocation: {loc}\nDescription:\n{clean_desc[:2000]}"
+                    llm_out = await llm_engine.extract_structured(
+                        raw_text=input_text,
+                        schema_cls=JobExtractionSchema,
+                        instruction=JOB_EXTRACTION_PROMPT,
+                    )
+                    if llm_out:
+                        is_remote = llm_out.is_remote
+                        if isinstance(llm_out.role_family, RoleFamilyEnum):
+                            role_fam = llm_out.role_family
+                except Exception as exc:
+                    logger.debug(f"LLM job extraction fallback for '{title}': {exc}")
+
+        return await self._build_record(
+            raw_company=company,
+            title=title,
+            raw_date=raw_date,
+            url=apply_url,
+            source_name="YC HN Who Is Hiring AI",
+            remote=is_remote,
+            role_family=role_fam,
+        )
+
     async def fetch_yc_hn_jobs(self) -> List[JobRecord]:
-        records: List[JobRecord] = []
+        """Fetch and extract YC HN Who Is Hiring jobs with concurrent LLM extraction."""
         try:
             entries = await self.fetch_feed("https://hnrss.org/whoishiring/jobs?q=AI")
-            for entry in entries:
-                desc = getattr(entry, "summary", "") or getattr(entry, "description", "")
-                clean_desc = re.sub(r"<[^>]+>", "", desc).strip()
-                first_line = clean_desc.split("\n")[0].strip() if clean_desc else ""
-                if "|" in first_line:
-                    parts = [p.strip() for p in first_line.split("|")]
-                    company = parts[0]
-                    title = parts[1] if len(parts) > 1 else first_line
-                    loc = parts[2] if len(parts) > 2 else ""
-                elif "is the" in first_line:
-                    company = first_line.split("is the")[0].strip()
-                    title = first_line[:100]
-                    loc = ""
-                else:
-                    company = getattr(entry, "author", "") or "AI Startup"
-                    title = first_line[:100]
-                    loc = ""
-                if not AI_KEYWORD_PATTERN.search(title):
-                    continue
-                raw_date = getattr(entry, "published", None)
-                if not self.check_freshness(raw_date):
-                    continue
-                apply_urls = re.findall(r'https?://[^\s<>"\'\)]+', desc)
-                apply_url = next(
-                    (u for u in apply_urls if not any(d in u for d in ("ycombinator.com", "hnrss.org", "w3.org"))),
-                    getattr(entry, "link", ""),
-                )
-                # Default heuristics
-                is_remote = self._is_remote(location=loc, title=title)
-                role_fam = classify_role_family(title)
-
-                # LLM extraction when description text is available (clean_desc >= 40 chars)
-                if len(clean_desc) >= 40:
-                    try:
-                        input_text = f"Job Title: {title}\nLocation: {loc}\nDescription:\n{clean_desc[:2000]}"
-                        llm_out = await llm_engine.extract_structured(
-                            raw_text=input_text,
-                            schema_cls=JobExtractionSchema,
-                            instruction=JOB_EXTRACTION_PROMPT,
-                        )
-                        if llm_out:
-                            is_remote = llm_out.is_remote
-                            if isinstance(llm_out.role_family, RoleFamilyEnum):
-                                role_fam = llm_out.role_family
-                    except Exception as exc:
-                        logger.debug(f"LLM job extraction fallback for '{title}': {exc}")
-
-                rec = await self._build_record(
-                    raw_company=company,
-                    title=title,
-                    raw_date=getattr(entry, "published", None),
-                    url=apply_url,
-                    source_name="YC HN Who Is Hiring AI",
-                    remote=is_remote,
-                    role_family=role_fam,
-                )
-                if rec:
-                    records.append(rec)
+            sem = asyncio.Semaphore(5)
+            tasks = [self._process_yc_hn_entry(entry, sem) for entry in entries]
+            records = await asyncio.gather(*tasks)
+            return [r for r in records if r is not None]
         except Exception as exc:
             logger.warning(f"YC HN fetch error: {exc}")
-        return records
+            return []
 
     async def crawl(self) -> List[JobRecord]:
         """Crawl 5 AI job boards concurrently with 24h freshness enforcement."""

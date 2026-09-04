@@ -283,25 +283,63 @@ class ResearchPapersCrawler(TargetedCrawler):
             )
         )
 
+    async def _enrich_batch(self, batch: List[Tuple[ResearchPaperRecord, str]]) -> None:
+        """Enrich a batch of paper records with GitHub stars in background."""
+        for rec, repo_path in batch:
+            if self._github_quota_exhausted:
+                break
+            try:
+                repo_url, stars = await self._fetch_stars(repo_path)
+                rec.content.github_url = repo_url
+                rec.content.github_stars = stars
+            except Exception as exc:
+                logger.debug(f"Background star enrichment error for {repo_path}: {exc}")
+
     async def crawl(self) -> List[ResearchPaperRecord]:
-        """Execute concurrent papers acquisition with optimal batching up to target count."""
+        """Execute concurrent papers acquisition with decoupled ingestion and enrichment."""
         logger.info(f"Starting ResearchPapersCrawler (Target: {self.target_count} papers)...")
         offset = 0
+        enrich_tasks: List[asyncio.Task] = []
 
         while not self.is_full:
             needed = min(500, self.remaining)
             papers = await self.fetch_papers_batch(offset, needed)
             if not papers:
                 break
-            batch = await asyncio.gather(*[self.enrich_paper(p) for p in papers])
-            for rec in batch:
-                if rec:
-                    self.add(rec.content.paper_url, rec, already_seen=True)
+
+            # 1. Immediately ingest records into self.collected and streaming WAL
+            batch_to_enrich: List[Tuple[ResearchPaperRecord, str]] = []
+            for p in papers:
+                rec = ResearchPaperRecord(
+                    content=ResearchPaperContent(
+                        title=p["title"],
+                        authors=p["authors"],
+                        paper_url=p["paper_url"],
+                        github_url=f"https://github.com/{p['abstract_repo']}" if p.get("abstract_repo") else None,
+                        github_stars=None,
+                        published_date=p["published_date"],
+                    )
+                )
+                self.add(rec.content.paper_url, rec, already_seen=True)
+                if p.get("abstract_repo"):
+                    batch_to_enrich.append((rec, p["abstract_repo"]))
+                if self.is_full:
+                    break
+
+            # 2. Asynchronously enrich GitHub stars in background without blocking paper ingestion
+            if batch_to_enrich and not self._github_quota_exhausted:
+                enrich_task = asyncio.create_task(self._enrich_batch(batch_to_enrich))
+                enrich_tasks.append(enrich_task)
+
             offset += len(papers)
             logger.info(
                 f"Papers progress: {len(self.collected)}/{self.target_count} collected"
                 f" (GitHub enrichment {'active' if not self._github_quota_exhausted else 'disabled: quota exhausted'})."
             )
+
+        # 3. Finalize all pending background star enrichments before returning
+        if enrich_tasks:
+            await asyncio.gather(*enrich_tasks, return_exceptions=True)
 
         logger.info(f"Completed ResearchPapersCrawler: {len(self.collected)} papers collected.")
         return self.collected[:self.target_count]

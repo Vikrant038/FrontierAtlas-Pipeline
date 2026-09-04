@@ -1,3 +1,4 @@
+import asyncio
 from typing import AsyncIterator, List, Optional
 
 from src.crawlers.base import TargetedCrawler, github_headers
@@ -46,25 +47,47 @@ class StartupsCrawler(TargetedCrawler):
         )
 
 
+    async def _fetch_yc_page(self, page: int) -> List[tuple]:
+        """Fetch a single YC companies page and extract startup tuples."""
+        try:
+            data = await self.fetch_json(f"{self.YC_API_URL}&page={page}")
+        except Exception as exc:
+            logger.warning(f"Error fetching YC companies (page {page}): {exc}")
+            return []
+        companies = (data or {}).get("companies", [])
+        results = []
+        for c in companies:
+            team_size = c.get("teamSize")
+            results.append((
+                c.get("name"),
+                "Y Combinator",
+                c.get("website") or c.get("url") or f"https://www.ycombinator.com/companies/{c.get('slug', '')}",
+                team_size if isinstance(team_size, int) and team_size >= 1 else None,
+            ))
+        return results
+
     async def _yc_candidates(self) -> AsyncIterator[tuple]:
         """Yield (name, source, url, employee_count) candidates from Y Combinator pages."""
-        for page in range(1, 25):
-            try:
-                data = await self.fetch_json(f"{self.YC_API_URL}&page={page}")
-            except Exception as exc:
-                logger.warning(f"Error fetching YC companies (page {page}): {exc}")
-                return
-            companies = (data or {}).get("companies", [])
-            if not companies:
-                return
-            for c in companies:
-                team_size = c.get("teamSize")
-                yield (
-                    c.get("name"),
-                    "Y Combinator",
-                    c.get("website") or c.get("url") or f"https://www.ycombinator.com/companies/{c.get('slug', '')}",
-                    team_size if isinstance(team_size, int) and team_size >= 1 else None,
-                )
+        # Check page 1 first to respect tests and avoid querying empty endpoints
+        p1_candidates = await self._fetch_yc_page(1)
+        for cand in p1_candidates:
+            yield cand
+        if not p1_candidates:
+            return
+
+        # Fetch subsequent pages in parallel batches of 4
+        sem = asyncio.Semaphore(4)
+
+        async def _bounded_fetch(p: int) -> List[tuple]:
+            async with sem:
+                return await self._fetch_yc_page(p)
+
+        for batch_start in range(2, 25, 4):
+            batch_pages = range(batch_start, min(batch_start + 4, 25))
+            results = await asyncio.gather(*(_bounded_fetch(p) for p in batch_pages))
+            for page_candidates in results:
+                for cand in page_candidates:
+                    yield cand
 
     async def _hf_candidates(self) -> AsyncIterator[tuple]:
         """Yield (name, source, url, employee_count) candidates from Hugging Face model orgs."""
@@ -89,8 +112,8 @@ class StartupsCrawler(TargetedCrawler):
                         headers=github_headers(self.github_token),
                     )
                 except Exception as exc:
-                    logger.warning(f"Error fetching GitHub orgs for '{query}': {exc}")
-                    break
+                    logger.warning(f"Error fetching GitHub orgs for '{query}' (page {page}): {exc}")
+                    continue
                 items = (data or {}).get("items", [])
                 if not items:
                     break

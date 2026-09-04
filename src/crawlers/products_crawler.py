@@ -79,14 +79,34 @@ class ProductsCrawler(TargetedCrawler):
         return self.classify_pricing(name, url, desc)
 
     @staticmethod
-    def _get_raw_maker(name: str, desc: str, url: str) -> str:
+    def _extract_github_owner(url: str) -> Optional[str]:
+        """Extract owner or organization from GitHub repository URL."""
+        if "github.com/" in url:
+            gh_m = re.search(r"github\.com/([^/\s?#]+)", url)
+            if gh_m:
+                owner = gh_m.group(1).strip()
+                if owner and owner.lower() not in (
+                    "topics", "trending", "features", "explore", "pricing",
+                    "collections", "events", "readme", "about", "site"
+                ):
+                    return owner
+        return None
+
+    @classmethod
+    def _get_raw_maker(cls, name: str, desc: str, url: str) -> str:
         m = re.search(r"\b(?:by|from)\s+([A-Z][A-Za-z0-9\s&.-]{1,30}?)(?:\s+(?:is|has|was|provides|\.|\,)|$)", desc)
         raw_maker = m.group(1).strip() if m else name
         # Sentence-like fallbacks (essay titles, citations) are not companies:
-        # derive the org from the product URL domain instead.
-        if len(raw_maker.split()) > 5 or raw_maker.endswith((".", "!", "?")):
+        # derive the org from GitHub repo owner or the product URL domain instead.
+        if len(raw_maker.split()) > 5 or raw_maker.endswith((".", "!", "?")) or raw_maker.lower() in ("github", "github.com"):
+            gh_owner = cls._extract_github_owner(url)
+            if gh_owner:
+                return gh_owner
             domain = extract_domain(url)
-            raw_maker = domain.split(".")[0].capitalize() if domain else name
+            if domain and domain.lower() not in ("github.com", "github"):
+                raw_maker = domain.split(".")[0].capitalize()
+            else:
+                raw_maker = name
         return raw_maker
 
     @classmethod

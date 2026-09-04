@@ -160,6 +160,12 @@ class NewsCrawler(AsyncBaseCrawler):
                 logger.debug(f"LLM summary extraction fallback for '{title}': {exc}")
         return summary, is_llm_summary
 
+    def _rollback_seen(self, url: str, title: str) -> None:
+        """Roll back reserved dedup keys on freshness rejection."""
+        self._seen_urls.discard(url)
+        if title in self._seen_titles:
+            self._seen_titles.remove(title)
+
     async def _process_entry(self, entry: Any, source_name: str) -> Optional[NewsRecord]:
         title = getattr(entry, "title", "").strip()
         link = getattr(entry, "link", "").strip()
@@ -205,15 +211,11 @@ class NewsCrawler(AsyncBaseCrawler):
             if has_source_date:
                 # Source stated a date but it failed the 24h gate (all heuristics missed):
                 # strictly stale - novelty stamping must not override a real date.
-                self._seen_urls.discard(norm_url)
-                if norm_title in self._seen_titles:
-                    self._seen_titles.remove(norm_title)
+                self._rollback_seen(norm_url, norm_title)
                 return None
             if norm_url in self._prev_run_urls:
                 # Truly dateless, seen in a previous run: not new, reject.
-                self._seen_urls.discard(norm_url)
-                if norm_title in self._seen_titles:
-                    self._seen_titles.remove(norm_title)
+                self._rollback_seen(norm_url, norm_title)
                 return None
             # Truly dateless, never seen before: treat as new since last run.
             pub_date = datetime.now(timezone.utc)

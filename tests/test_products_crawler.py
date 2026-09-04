@@ -34,6 +34,24 @@ def test_products_crawler_maker_extraction():
     assert maker == "Perplexity AI"
 
 
+def test_products_crawler_github_maker_attribution():
+    # Arrange: Sentence-like tool name with GitHub repository URL
+    name = "A Highly Scalable LLM Inference System for GPUs"
+    desc = "High-throughput and memory-efficient LLM serving engine."
+    gh_url = "https://github.com/vllm-project/vllm"
+
+    # Act
+    maker = ProductsCrawler._extract_maker(name, desc, gh_url)
+
+    # Assert: Should attribute to vllm-project, NEVER to 'Github'
+    assert maker != "Github"
+    assert "vllm" in maker.lower()
+
+    # Direct test of _extract_github_owner
+    assert ProductsCrawler._extract_github_owner("https://github.com/microsoft/autogen") == "microsoft"
+    assert ProductsCrawler._extract_github_owner("https://github.com/topics/ai") is None
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_products_crawler_markdown_parsing_sections():

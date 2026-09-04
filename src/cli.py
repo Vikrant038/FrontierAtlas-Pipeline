@@ -133,22 +133,32 @@ async def run_pipeline(
     startups, products, papers, jobs, news = [], [], [], [], []
 
     try:
-        # Phase I: Bulk Data Acquisition
+        phase1_tasks = []
         if run_phase1:
-            console.print(f"[yellow]Executing Phase I: Bulk Acquisition (Target: {target_count})...[/yellow]")
-            papers, startups, products = await asyncio.gather(
+            console.print(f"[yellow]Launching Phase I: Bulk Acquisition (Target: {target_count})...[/yellow]")
+            phase1_tasks = [
                 _crawl(ResearchPapersCrawler, target_count=target_count),
                 _crawl(StartupsCrawler, target_count=target_count),
                 _crawl(ProductsCrawler, target_count=target_count),
-            )
+            ]
 
-        # Phase II: High-Fidelity Signal Ingestion (24h Freshness)
+        phase2_tasks = []
         if run_phase2:
-            console.print("[yellow]Executing Phase II: 24h Signal Monitoring (5 News + 5 Job Boards)...[/yellow]")
-            news, jobs = await asyncio.gather(
+            console.print("[yellow]Launching Phase II: 24h Signal Monitoring (5 News + 5 Job Boards)...[/yellow]")
+            phase2_tasks = [
                 _crawl(NewsCrawler),
                 _crawl(JobsCrawler),
-            )
+            ]
+
+        if phase1_tasks and phase2_tasks:
+            results = await asyncio.gather(*phase1_tasks, *phase2_tasks)
+            papers, startups, products = results[0], results[1], results[2]
+            news, jobs = results[3], results[4]
+        elif phase1_tasks:
+            papers, startups, products = await asyncio.gather(*phase1_tasks)
+        elif phase2_tasks:
+            news, jobs = await asyncio.gather(*phase2_tasks)
+
     except asyncio.CancelledError:
         console.print("[yellow]Pipeline execution interrupted. Saving entity cache and exiting...[/yellow]")
         entity_resolver.save_cache()
@@ -160,12 +170,13 @@ async def run_pipeline(
     logs = entity_resolver.audit_log
 
     # Persist learned entities & domain grounding so subsequent runs start warm.
-    entity_resolver.save_cache()
+    await asyncio.to_thread(entity_resolver.save_cache)
 
     # Phase VI: Export Deliverables
     console.print("[yellow]Executing Phase VI: Exporting 6-Tab Excel & Graph Construction...[/yellow]")
     exporter = ExcelExporter()
-    exporter.export(
+    await asyncio.to_thread(
+        exporter.export,
         filepath=output_xlsx,
         startups=startups,
         products=products,
@@ -176,7 +187,8 @@ async def run_pipeline(
     )
 
     csv_exporter = CSVExporter()
-    csv_exporter.export_all(
+    await asyncio.to_thread(
+        csv_exporter.export_all,
         startups=startups,
         products=products,
         papers=papers,
@@ -187,7 +199,14 @@ async def run_pipeline(
 
     # In-memory graph
     graph_builder = KnowledgeGraphBuilder()
-    graph_builder.build_graph(startups=startups, products=products, papers=papers, jobs=jobs, news=news)
+    await asyncio.to_thread(
+        graph_builder.build_graph,
+        startups=startups,
+        products=products,
+        papers=papers,
+        jobs=jobs,
+        news=news,
+    )
     metrics = graph_builder.get_summary_metrics()
 
     # Telemetry summary table
@@ -213,7 +232,8 @@ async def run_pipeline(
     console.print(f"[bold green]✨ Multi-Tab Excel exported to: {output_xlsx}[/bold green]")
 
     if upload_sheets:
-        _handle_sheets_upload(
+        await asyncio.to_thread(
+            _handle_sheets_upload,
             startups=startups,
             products=products,
             papers=papers,
