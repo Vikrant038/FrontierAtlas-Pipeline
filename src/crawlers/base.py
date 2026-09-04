@@ -5,6 +5,7 @@ SSRF URL sanitization, and curl-cffi TLS impersonation fallback.
 """
 
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from datetime import datetime
@@ -38,6 +39,11 @@ DEFAULT_HEADERS = {
 
 class TransientNetworkError(Exception):
     """Raised on 429, 500, 502, 503, 504, or network disconnects."""
+    pass
+
+
+class BotBlockedError(Exception):
+    """Raised on HTTP 403: target rejected the client fingerprint (anti-bot wall)."""
     pass
 
 
@@ -118,6 +124,8 @@ class AsyncBaseCrawler(ABC):
         async with self.semaphore:
             try:
                 resp = await client.get(safe_url, params=params, headers=req_headers)
+                if resp.status_code == 403:
+                    raise BotBlockedError(f"HTTP 403 for {safe_url}")
                 if resp.status_code in (429, 500, 502, 503, 504):
                     if resp.status_code == 429:
                         await _handle_retry_after(resp.headers, safe_url)
@@ -128,34 +136,49 @@ class AsyncBaseCrawler(ABC):
                 raise TransientNetworkError(str(net_err)) from net_err
 
     async def fetch(self, url: str, params: Optional[Dict[str, Any]] = None) -> str:
-        """Fetch URL content as text string."""
-        return (await self._request(url, params=params)).text
+        """Fetch URL content as text string; escalates to TLS impersonation on 403 anti-bot blocks."""
+        try:
+            return (await self._request(url, params=params)).text
+        except BotBlockedError:
+            logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
+            return await self.fetch_tls(url, params=params)
 
     async def fetch_json(
         self,
         url: str,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
+        allow_tls_fallback: bool = True,
     ) -> Any:
-        """Fetch URL and return parsed JSON."""
-        return (await self._request(url, params=params, headers=headers)).json()
+        """Fetch URL and return parsed JSON; escalates to TLS impersonation on 403 anti-bot blocks."""
+        try:
+            return (await self._request(url, params=params, headers=headers)).json()
+        except BotBlockedError:
+            if not allow_tls_fallback:
+                raise
+            logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
+            return json.loads(await self.fetch_tls(url, params=params))
 
     @_CRAWLER_RETRY
-    async def fetch_tls(self, url: str) -> str:
+    async def fetch_tls(self, url: str, params: Optional[Dict[str, Any]] = None) -> str:
         """Fetch using curl-cffi with Chrome124 TLS fingerprint impersonation."""
         safe_url = validate_url_safe(url)
         async with self.semaphore:
             try:
                 async with CurlAsyncSession(impersonate="chrome124") as curl_session:
-                    resp = await curl_session.get(safe_url, headers=self.headers, timeout=int(self.timeout))
+                    resp = await curl_session.get(
+                        safe_url, params=params, headers=self.headers, timeout=int(self.timeout)
+                    )
+                    if resp.status_code == 403:
+                        raise BotBlockedError(f"curl-cffi HTTP 403 for {safe_url}")
                     if resp.status_code in (429, 500, 502, 503, 504):
                         if resp.status_code == 429:
                             await _handle_retry_after(resp.headers, safe_url)
                         raise TransientNetworkError(f"curl-cffi HTTP {resp.status_code}")
                     return resp.text
+            except (BotBlockedError, TransientNetworkError):
+                raise
             except Exception as exc:
-                if isinstance(exc, TransientNetworkError):
-                    raise
                 raise TransientNetworkError(str(exc)) from exc
 
     async def fetch_feed(self, url: str, params: Optional[Dict[str, Any]] = None) -> List[Any]:

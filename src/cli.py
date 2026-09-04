@@ -61,6 +61,9 @@ async def run_pipeline(
     # Re-resolving here would double-log entries.
     logs = entity_resolver.audit_log
 
+    # Persist learned entities & domain grounding so subsequent runs start warm.
+    entity_resolver.save_cache()
+
     # Phase VI: Export Deliverables
     console.print("[yellow]Executing Phase VI: Exporting 6-Tab Excel & Graph Construction...[/yellow]")
     exporter = ExcelExporter()
@@ -111,16 +114,22 @@ async def run_pipeline(
     console.print(f"[bold green]✨ Multi-Tab Excel exported to: {output_xlsx}[/bold green]")
 
 
+DEFAULT_OUTPUT_XLSX = "exports/FrontierAtlas_Intelligence.xlsx"
+PHASE1_OUTPUT_XLSX = "exports/phase1_test.xlsx"
+
+
 @click.command()
 @click.option("--phase", type=click.Choice(["1", "2", "all"]), default="all", help="Phase to execute")
 @click.option("--target", type=int, default=1000, help="Target record count for Phase I")
-@click.option("--output", type=str, default="exports/FrontierAtlas_Intelligence.xlsx", help="Output Excel path")
+@click.option("--output", type=str, default=None, help="Output Excel path (default: phase1_test.xlsx for --phase 1, else FrontierAtlas_Intelligence.xlsx)")
 def main(phase: str, target: int, output: str):
     """FrontierAtlas AI Intelligence Pipeline CLI."""
     setup_logging()
     run_phase1 = phase in ("1", "all")
     run_phase2 = phase in ("2", "all")
-    asyncio.run(run_pipeline(run_phase1=run_phase1, run_phase2=run_phase2, target_count=target, output_xlsx=output))
+    # Default output aligns with scripts/verify_phase1.py expectations per phase.
+    output_xlsx = output or (PHASE1_OUTPUT_XLSX if phase == "1" else DEFAULT_OUTPUT_XLSX)
+    asyncio.run(run_pipeline(run_phase1=run_phase1, run_phase2=run_phase2, target_count=target, output_xlsx=output_xlsx))
 
 
 if __name__ == "__main__":

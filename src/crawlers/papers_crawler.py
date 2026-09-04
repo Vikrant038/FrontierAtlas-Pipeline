@@ -11,12 +11,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import feedparser
 
 from src.config import settings
-from src.crawlers.base import TargetedCrawler
+from src.crawlers.base import BotBlockedError, TargetedCrawler
 from src.schemas.entities import ResearchPaperContent, ResearchPaperRecord
 from src.utils.date_normalizer import parse_datetime_to_utc
 from src.utils.logger import logger
 
 GITHUB_URL_PATTERN = re.compile(r"https?://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
+
+GITHUB_MIN_REQUEST_INTERVAL_SECONDS = 2.1  # ~28 req/min, safely under 5,000/hr authenticated & 60/hr anonymous budgets
 
 
 class ResearchPapersCrawler(TargetedCrawler):
@@ -30,7 +32,12 @@ class ResearchPapersCrawler(TargetedCrawler):
         super().__init__(target_count=target_count, **kwargs)
         self.github_token = settings.github_token
         self._last_arxiv_time: float = 0.0
+        self._last_github_time: float = 0.0
+        self._github_pace_lock = asyncio.Lock()
         self._use_cdn = False
+        # Sentinel disables star enrichment after quota exhaustion (prevents
+        # thousands of doomed requests in anonymous mode: 60 req/hr cap).
+        self._github_quota_exhausted: bool = False
 
     def _gh_headers(self) -> Dict[str, str]:
         headers = {"Accept": "application/vnd.github+json"}
@@ -38,16 +45,53 @@ class ResearchPapersCrawler(TargetedCrawler):
             headers["Authorization"] = f"Bearer {self.github_token}"
         return headers
 
+    async def _pace_github(self) -> None:
+        """Leaky-bucket pacing for GitHub API, safe under concurrent asyncio.gather enrichment."""
+        # Serialize the check-then-sleep-then-stamp sequence: concurrent enrich
+        # tasks each reserve a distinct slot spaced by the minimum interval.
+        async with self._github_pace_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_github_time
+            if elapsed < GITHUB_MIN_REQUEST_INTERVAL_SECONDS:
+                await asyncio.sleep(GITHUB_MIN_REQUEST_INTERVAL_SECONDS - elapsed)
+            self._last_github_time = time.monotonic()
+
+    def _is_github_quota_exhaustion(self, exc: Exception) -> bool:
+        """Detect GitHub rate-limit exhaustion (HTTP 403/429 with quota headers or message)."""
+        exc_text = str(exc).lower()
+        return (
+            "403" in exc_text and ("rate limit" in exc_text or "quota" in exc_text)
+        ) or "429" in exc_text
+
     async def _fetch_stars(self, repo_path: Optional[str]) -> Tuple[Optional[str], Optional[int]]:
-        """Direct GitHub repository and star lookup via authenticated REST API."""
+        """GitHub repository and star lookup with pacing and quota-exhaustion shutdown."""
         if not repo_path:
             return None, None
+        if self._github_quota_exhausted:
+            logger.debug(f"GitHub quota exhausted; skipping star lookup for {repo_path}.")
+            return f"https://github.com/{repo_path}", None
+
+        await self._pace_github()
         try:
-            data = await self.fetch_json(f"https://api.github.com/repos/{repo_path}", headers=self._gh_headers())
+            # GitHub API 403 = quota exhaustion, not fingerprint blocking; TLS retry cannot help.
+            data = await self.fetch_json(
+                f"https://api.github.com/repos/{repo_path}",
+                headers=self._gh_headers(),
+                allow_tls_fallback=False,
+            )
             if data and "stargazers_count" in data:
                 return f"https://github.com/{repo_path}", data["stargazers_count"]
-        except Exception:
-            pass
+        except BotBlockedError:
+            # GitHub signals quota exhaustion with HTTP 403; TLS retry cannot help here.
+            self._github_quota_exhausted = True
+            logger.warning("GitHub API quota exhausted (HTTP 403). Disabling star enrichment for remainder of this run.")
+        except Exception as exc:
+            logger.warning(f"GitHub star lookup failed for {repo_path}: {exc}")
+            if self._is_github_quota_exhaustion(exc):
+                self._github_quota_exhausted = True
+                logger.warning(
+                    "GitHub API quota exhausted. Disabling star enrichment for remainder of this run."
+                )
         return f"https://github.com/{repo_path}", None
 
     def _parse_feed_entry(self, entry: Any) -> Optional[Dict[str, Any]]:
@@ -182,6 +226,10 @@ class ResearchPapersCrawler(TargetedCrawler):
             batch = await asyncio.gather(*[self.enrich_paper(p) for p in papers])
             self.collected.extend(batch)
             offset += len(papers)
+            logger.info(
+                f"Papers progress: {len(self.collected)}/{self.target_count} collected"
+                f" (GitHub enrichment {'active' if not self._github_quota_exhausted else 'disabled: quota exhausted'})."
+            )
 
         logger.info(f"Completed ResearchPapersCrawler: {len(self.collected)} papers collected.")
         return self.collected[:self.target_count]
