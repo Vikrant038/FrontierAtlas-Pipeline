@@ -165,7 +165,7 @@ async def run_scenario_4_rate_limiter_pacing() -> bool:
     print(f"Testing ProviderRateLimiter with 15 RPM ceiling...")
     # Use a 2.0-second window scaled for 15 RPM to demonstrate active pacing without 60s idle
     test_limiter = ProviderRateLimiter(rpm_limits={"gemini": 15}, window_seconds=2.0)
-    
+
     slept_count = 0
     t0 = time.monotonic()
     for i in range(1, 21):
@@ -178,9 +178,11 @@ async def run_scenario_4_rate_limiter_pacing() -> bool:
 
     total_time = time.monotonic() - t0
     print(f"✅ Rate limiter pacing verified across 20 calls in {total_time:.2f}s:")
-    print(f"   • Rapid requests granted without delay: 15/20")
-    print(f"   • Requests paced: {slept_count}/20 (requests 16-20 paced as expected)")
+    print(f"   • First 15 requests granted instantly (full window capacity)")
+    print(f"   • Requests paced after saturation: {slept_count}/20 (sliding window rolls grants out one-by-one,"
+          f" so later requests re-acquire instantly as capacity frees)")
     assert slept_count > 0, "Rate limiter did not pace after 15 requests!"
+    assert total_time >= 2.0, "Expected at least one full window wait (~2s) for 20 requests at 15-per-window!"
     return True
 
 

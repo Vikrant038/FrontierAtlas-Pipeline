@@ -87,7 +87,7 @@ class MultiTierLLMEngine:
 
     @_LLM_RETRY
     async def _call_gemini(self, prompt: str, schema_json: str) -> str:
-        """Tier 1: Google Gemini Flash using official modern google-genai SDK."""
+        """Tier 1: Google Gemini Flash using google-genai AsyncChat (AFC-safe path)."""
         if not settings.gemini_api_key:
             raise LLMTransientError("Gemini API key is not configured.")
         try:
@@ -97,14 +97,15 @@ class MultiTierLLMEngine:
             client = self._clients["gemini"]
             from google.genai import types
 
-            response = await client.aio.models.generate_content(
+            # Fresh chat per call: schema differs per request; stateless extraction.
+            chat = client.aio.chats.create(
                 model=settings.gemini_model,
-                contents=f"{prompt}\n\nStrict JSON schema:\n{schema_json}",
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     temperature=0.1,
                 ),
             )
+            response = await chat.send_message(f"{prompt}\n\nStrict JSON schema:\n{schema_json}")
             return response.text or "{}"
         except Exception as exc:
             err_msg = str(exc).lower()

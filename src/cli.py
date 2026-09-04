@@ -61,6 +61,16 @@ def _handle_sheets_upload(
     )
     if sheet_url:
         console.print(f"[bold green]📊 Live Google Sheets URL: {sheet_url}[/bold green]")
+    else:
+        console.print(
+            "[yellow]⚠️  Google Sheets upload could not complete.\n"
+            "Tip: On personal Google accounts, service accounts have 0 MB Drive storage.\n"
+            "To resolve:\n"
+            "  1. Create a blank sheet in your Google Drive (https://sheets.new).\n"
+            f"  2. Click 'Share' and share it with: {sheets_exporter.service_account_email} (as Editor).\n"
+            "  3. Copy the Spreadsheet ID from the URL and set GOOGLE_SHEETS_SPREADSHEET_ID=<id> in .env.\n"
+            "Excel (.xlsx) and CSV deliverables remain fully intact.[/yellow]"
+        )
 
 
 async def run_pipeline(

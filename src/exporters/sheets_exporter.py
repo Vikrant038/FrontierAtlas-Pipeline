@@ -35,9 +35,15 @@ class GoogleSheetsExporter:
         spreadsheet_id: Optional[str] = None,
         evaluator_email: Optional[str] = None,
     ):
-        self.service_account_path = service_account_path or settings.effective_service_account_path
-        self.spreadsheet_id = spreadsheet_id or settings.google_sheets_spreadsheet_id
-        self.evaluator_email = evaluator_email or settings.evaluator_email
+        self.service_account_path = (
+            service_account_path if service_account_path is not None else settings.effective_service_account_path
+        )
+        self.spreadsheet_id = (
+            spreadsheet_id if spreadsheet_id is not None else settings.google_sheets_spreadsheet_id
+        )
+        self.evaluator_email = (
+            evaluator_email if evaluator_email is not None else settings.evaluator_email
+        )
         self._client: Optional[gspread.Client] = None
 
     def is_configured(self) -> bool:
@@ -63,6 +69,19 @@ class GoogleSheetsExporter:
             logger.error(f"Failed to authenticate with Google Sheets service account: {exc}")
             return None
 
+    @property
+    def service_account_email(self) -> str:
+        """Extract client_email from the service account JSON if available."""
+        if self.service_account_path and os.path.exists(self.service_account_path):
+            try:
+                import json
+                with open(self.service_account_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("client_email", "your-service-account@...iam.gserviceaccount.com")
+            except Exception:
+                pass
+        return "your-service-account@...iam.gserviceaccount.com"
+
     def get_or_create_spreadsheet(
         self,
         client: gspread.Client,
@@ -79,9 +98,20 @@ class GoogleSheetsExporter:
                     f"Could not open spreadsheet ID {self.spreadsheet_id} ({exc}). "
                     f"Falling back to creating a new spreadsheet named '{title}'."
                 )
-        spreadsheet = client.create(title)
-        logger.info(f"Created new Google Spreadsheet: '{title}' (ID: {spreadsheet.id})")
-        return spreadsheet
+        try:
+            spreadsheet = client.create(title)
+            logger.info(f"Created new Google Spreadsheet: '{title}' (ID: {spreadsheet.id})")
+            return spreadsheet
+        except Exception as exc:
+            err_msg = str(exc)
+            if "storage quota" in err_msg.lower() or "403" in err_msg:
+                sa_email = self.service_account_email
+                logger.error(
+                    "Google Drive storage quota error: Google Cloud service accounts have 0 MB personal Drive storage by default. "
+                    f"Resolution: Create a blank sheet in your Google Drive, share it with '{sa_email}' as Editor, "
+                    "and set GOOGLE_SHEETS_SPREADSHEET_ID in your .env file."
+                )
+            raise
 
     def _prepare_worksheet(
         self,

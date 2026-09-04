@@ -152,7 +152,7 @@ def test_evaluator_sharing_reminder_when_email_unset(tmp_path):
     # Arrange
     exporter = GoogleSheetsExporter(
         service_account_path=str(tmp_path / "fake.json"),
-        evaluator_email=None,
+        evaluator_email="",
     )
     mock_spreadsheet = MagicMock()
     mock_spreadsheet.url = "https://docs.google.com/spreadsheets/d/123"
