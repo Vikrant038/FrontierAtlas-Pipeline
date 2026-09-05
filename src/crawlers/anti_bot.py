@@ -8,7 +8,7 @@ to their fallbacks.
 
 import time
 from collections import defaultdict, deque
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 from src.utils.logger import logger
@@ -75,11 +75,24 @@ def _record_escalation_success(host: str) -> None:
     _block_history[host].clear()
 
 
+def _matched_challenge_marker(content: str) -> Optional[str]:
+    """Return the first challenge marker present in the content, or None."""
+    lower = content.lower()
+    return next((m for m in _CHALLENGE_MARKERS if m in lower), None)
+
+
 def _looks_like_challenge(content: Any) -> bool:
-    """Heuristic: bot-challenge interstitials are short pages carrying verification markers."""
+    """Heuristic: bot-challenge interstitials are short pages carrying verification markers.
+    A positive match is logged at WARNING with the matched marker so previously-unknown
+    challenge vendors surface in telemetry instead of silently passing as content."""
     if not isinstance(content, str) or not content:
         return False
     if len(content) > _MAX_CHALLENGE_PAGE_CHARS:
         return False
-    lower = content.lower()
-    return any(marker in lower for marker in _CHALLENGE_MARKERS)
+    matched = _matched_challenge_marker(content)
+    if matched:
+        logger.warning(
+            f"Bot-challenge page detected (marker: '{matched}', {len(content)} chars) — "
+            "content is a block interstitial, not data."
+        )
+    return matched is not None

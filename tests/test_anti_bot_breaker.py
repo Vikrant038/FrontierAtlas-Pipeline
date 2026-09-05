@@ -136,7 +136,7 @@ async def test_escalate_tls_treats_challenge_page_as_block():
         return "<html><title>Attention Required!</title>cf-challenge</html>"
 
     crawler.fetch_tls = fake_fetch_tls  # type: ignore[method-assign]
-    successes_before = base.AsyncBaseCrawler.escalation_successes
+    successes_before = crawler.escalation_successes
 
     # Act: TLS challenge escalates to Camoufox, which fails -> BotBlockedError
     with pytest.raises(BotBlockedError):
@@ -144,7 +144,7 @@ async def test_escalate_tls_treats_challenge_page_as_block():
     await crawler.close()
 
     # Assert: a challenge page is never counted as an escalation success
-    assert base.AsyncBaseCrawler.escalation_successes == successes_before
+    assert crawler.escalation_successes == successes_before
 
 
 def test_looks_like_challenge_detects_short_interstitials():
@@ -163,3 +163,29 @@ def test_looks_like_challenge_ignores_long_pages_and_non_strings():
     assert not _looks_like_challenge("")
     assert not _looks_like_challenge(None)
     assert not _looks_like_challenge(b"captcha")
+
+@pytest.mark.asyncio
+async def test_escalation_counters_are_instance_scoped():
+    # A2: counters must be per-instance, not class-level shared state — one
+    # crawler's escalations must not leak into another's telemetry.
+    c1 = TargetedCrawler(target_count=1)
+    c2 = TargetedCrawler(target_count=1)
+
+    async def fake_fetch_tls(url, params=None, timeout=None):
+        return "<html>real content, definitely not a challenge page</html>"
+
+    c1.fetch_tls = fake_fetch_tls  # type: ignore[method-assign]
+    c2.fetch_tls = fake_fetch_tls  # type: ignore[method-assign]
+
+    await c1._escalate_tls("https://one.example.com/a")
+    await c1._escalate_tls("https://one.example.com/b")
+    await c2._escalate_tls("https://two.example.com/a")
+    await c1.close()
+    await c2.close()
+
+    assert c1.escalation_attempts == 2 and c1.escalation_successes == 2
+    assert c2.escalation_attempts == 1 and c2.escalation_successes == 1
+    # Aggregation over a caller-provided registry (used by the run report)
+    snap = base.anti_bot_snapshot(active_crawlers=[c1, c2])
+    assert snap["escalation_attempts"] == 3
+    assert snap["escalation_successes"] == 3

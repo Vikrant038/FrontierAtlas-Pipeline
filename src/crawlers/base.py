@@ -98,11 +98,14 @@ async def _handle_retry_after(headers: Any, url: str) -> None:
         await asyncio.sleep(capped_wait)
 
 
-def anti_bot_snapshot() -> Dict[str, Any]:
-    """Telemetry for the run report: escalation counters and per-host breaker state."""
+def anti_bot_snapshot(active_crawlers: Optional[List["AsyncBaseCrawler"]] = None) -> Dict[str, Any]:
+    """Telemetry for the run report: escalation counters (summed across the provided
+    live crawler instances; callers pass their registry since crawlers are instance-
+    stateful) and per-host breaker state."""
+    crawlers = list(active_crawlers or [])
     return {
-        "escalation_attempts": AsyncBaseCrawler.escalation_attempts,
-        "escalation_successes": AsyncBaseCrawler.escalation_successes,
+        "escalation_attempts": sum(c.escalation_attempts for c in crawlers),
+        "escalation_successes": sum(c.escalation_successes for c in crawlers),
         "open_circuits": sorted(_block_cooldown_until.keys()),
         "block_counts": {host: len(hist) for host, hist in _block_history.items() if hist},
     }
@@ -111,15 +114,16 @@ def anti_bot_snapshot() -> Dict[str, Any]:
 class AsyncBaseCrawler(ABC):
     """Abstract base class for all asynchronous data crawlers."""
 
-    escalation_attempts: int = 0
-    escalation_successes: int = 0
-
     def __init__(
         self,
         concurrency_limit: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
         headers: Optional[Dict[str, str]] = None,
     ):
+        # Instance-level escalation telemetry: class attributes were shared across
+        # every crawler instance, so one instance's counter read another's blocks.
+        self.escalation_attempts: int = 0
+        self.escalation_successes: int = 0
         self.concurrency_limit = concurrency_limit or settings.max_concurrent_requests
         self.semaphore = asyncio.Semaphore(self.concurrency_limit)
         self.timeout = timeout_seconds or settings.default_request_timeout_seconds
@@ -236,7 +240,7 @@ class AsyncBaseCrawler(ABC):
             content = await asyncio.wait_for(_run_camoufox(), timeout=browser_timeout + 15.0)
             if _looks_like_challenge(content):
                 raise BotBlockedError(f"Bot challenge page returned by Camoufox for {safe_url}")
-            AsyncBaseCrawler.escalation_successes += 1
+            self.escalation_successes += 1
             return content
         except ImportError as imp_err:
             logger.error(f"Camoufox not installed: {imp_err}")
@@ -253,14 +257,14 @@ class AsyncBaseCrawler(ABC):
         as_json: bool = False,
     ) -> Any:
         """Escalate an anti-bot 403 to curl-cffi TLS impersonation, falling back to Camoufox if blocked."""
-        AsyncBaseCrawler.escalation_attempts += 1
+        self.escalation_attempts += 1
         logger.warning(f"Anti-bot block (403) on {url}. Escalating to curl-cffi TLS impersonation.")
         try:
             res_raw = await self.fetch_tls(url, params=params, timeout=timeout)
             if _looks_like_challenge(res_raw):
                 # 200-with-challenge is a block, not data; let the Camoufox tier try.
                 raise BotBlockedError(f"Bot challenge page returned by TLS tier for {url}")
-            AsyncBaseCrawler.escalation_successes += 1
+            self.escalation_successes += 1
             return json.loads(res_raw) if as_json else res_raw
         except BotBlockedError:
             logger.warning(f"curl-cffi TLS impersonation blocked for {url}. Escalating to Tier 3 Camoufox.")

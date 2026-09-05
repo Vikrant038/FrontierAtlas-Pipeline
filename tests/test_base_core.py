@@ -128,12 +128,12 @@ async def test_escalate_camoufox_success_json_and_challenge(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "camoufox.async_api", fake_mod.async_api)
 
     crawler = _ConcreteCrawler()
-    before = AsyncBaseCrawler.escalation_successes
+    before = crawler.escalation_successes
 
     # Plain content -> text returned, counter incremented
     out = await crawler._escalate_camoufox("https://example.com")
     assert "<html>ok</html>" in out
-    assert AsyncBaseCrawler.escalation_successes == before + 1
+    assert crawler.escalation_successes == before + 1
 
     # JSON content requested -> fail fast without a browser launch (the browser
     # tier renders HTML; JSON parsing of a page can never succeed).

@@ -100,7 +100,7 @@ def _write_run_report(
         "collected": counts,
         "resolution_log_rows": resolution_log_rows,
         "llm_tier_usage": llm_engine.get_tier_usage(),
-        "anti_bot": anti_bot_snapshot(),
+        "anti_bot": anti_bot_snapshot(active_crawlers=list(_ACTIVE_CRAWLERS.values())),
     }
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, "run_report.json")
