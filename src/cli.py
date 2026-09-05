@@ -112,6 +112,19 @@ def _collect_source_freshness() -> Dict[str, Dict[str, int]]:
     return out
 
 
+def _default_report_path(output_dir: Optional[str] = None) -> str:
+    """Resolve destination path for the run report.
+
+    Precedence:
+    1. If output_dir is explicitly specified and is not 'exports', write to that dir.
+    2. Otherwise, use settings.run_report_path (defaults to exports/run_report.json,
+       overridable via RUN_REPORT_PATH or conftest monkeypatch for hermetic testing).
+    """
+    if output_dir and output_dir != "exports":
+        return os.path.join(output_dir, "run_report.json")
+    return settings.run_report_path
+
+
 def _write_run_report(
     run_id: str,
     duration_s: float,
@@ -122,15 +135,17 @@ def _write_run_report(
     phase1: bool,
     phase2: bool,
     sheets_upload: str = "not_requested",
-    output_dir: str = "exports",
+    output_dir: Optional[str] = None,
+    report_path: Optional[str] = None,
 ) -> str:
     """Persist a machine-readable run report (CI/cron alerting primitive)."""
+    effective_duration = max(0.0, duration_s)
     report = {
         "run_id": run_id,
         "status": status,
         "phase1": phase1,
         "phase2": phase2,
-        "duration_seconds": round(duration_s, 1),
+        "duration_seconds": round(effective_duration, 1) if effective_duration >= 0.1 else round(effective_duration, 3),
         "target_count": target_count,
         "collected": counts,
         "resolution_log_rows": resolution_log_rows,
@@ -140,8 +155,9 @@ def _write_run_report(
         "stale_sources": _stale_sources_snapshot(),
         "anti_bot": anti_bot_snapshot(active_crawlers=list(_ACTIVE_CRAWLERS.values())),
     }
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, "run_report.json")
+    path = report_path or _default_report_path(output_dir)
+    target_dir = os.path.dirname(os.path.abspath(path))
+    os.makedirs(target_dir, exist_ok=True)
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
@@ -347,7 +363,7 @@ def _handle_sheets_upload(
     jobs: list,
     news: list,
     logs: list,
-) -> None:
+) -> str:
     """Execute Google Sheets upload or display clear instructions if unconfigured."""
     console.print("[yellow]Executing Deliverable 1: Uploading to Google Sheets...[/yellow]")
     sheets_exporter = GoogleSheetsExporter()
@@ -360,7 +376,7 @@ def _handle_sheets_upload(
             "  3. (Optional) Set EVALUATOR_EMAIL in .env to share viewer permissions automatically.\n"
             "Pipeline continued successfully; Excel (.xlsx) and CSV exports are preserved.[/yellow]"
         )
-        return
+        return "unconfigured"
 
     sheet_url = sheets_exporter.export(
         startups=startups,
@@ -372,6 +388,7 @@ def _handle_sheets_upload(
     )
     if sheet_url:
         console.print(f"[bold green]📊 Live Google Sheets URL: {sheet_url}[/bold green]")
+        return sheet_url
     else:
         console.print(
             "[yellow]⚠️  Google Sheets upload could not complete.\n"
@@ -382,6 +399,7 @@ def _handle_sheets_upload(
             "  3. Copy the Spreadsheet ID from the URL and set GOOGLE_SHEETS_SPREADSHEET_ID=<id> in .env.\n"
             "Excel (.xlsx) and CSV deliverables remain fully intact.[/yellow]"
         )
+        return "failed"
 
 
 def setup_signal_handlers(loop: asyncio.AbstractEventLoop, on_shutdown: Optional[Callable] = None):
@@ -488,7 +506,13 @@ async def _run_exports(
 
 
 def _report_interrupted(
-    run_id: str, run_started: float, target_count: int, run_phase1: bool, run_phase2: bool, output_dir: str = "exports",
+    run_id: str,
+    run_started: float,
+    target_count: int,
+    run_phase1: bool,
+    run_phase2: bool,
+    output_dir: Optional[str] = None,
+    report_path: Optional[str] = None,
 ) -> None:
     """Persist an interrupted-run report from the CancelledError handler."""
     console.print("[yellow]Pipeline execution interrupted. Saving entity cache and exiting...[/yellow]")
@@ -503,13 +527,16 @@ def _report_interrupted(
         phase1=run_phase1,
         phase2=run_phase2,
         output_dir=output_dir,
+        report_path=report_path,
     )
 
 
 async def _finalize_run(
     run_id: str, run_started: float, run_phase1: bool, run_phase2: bool, target_count: int,
     upload_sheets: bool, startups: List[Any], products: List[Any], papers: List[Any],
-    news: List[Any], jobs: List[Any], logs: List[Any], output_dir: str = "exports",
+    news: List[Any], jobs: List[Any], logs: List[Any],
+    output_dir: Optional[str] = None,
+    report_path: Optional[str] = None,
 ) -> bool:
     """Optional Sheets upload, stale-source warnings, shortfall gating, and the run report."""
     sheets_upload = "not_requested"
@@ -544,14 +571,24 @@ async def _finalize_run(
         phase2=run_phase2,
         sheets_upload=sheets_upload,
         output_dir=output_dir,
+        report_path=report_path,
     )
     return not shortfall
+
+
+def _format_duration(duration_s: float) -> str:
+    """Format runtime duration for terminal display (e.g. '~22 min' or '45.2s')."""
+    if duration_s >= 60.0:
+        mins = round(duration_s / 60.0)
+        return f"~{mins} min"
+    return f"{duration_s:.1f}s"
 
 
 def _render_summary(
     run_phase1: bool, run_phase2: bool, target_count: int,
     startups: List[Any], products: List[Any], papers: List[Any],
     news: List[Any], jobs: List[Any], metrics: Dict[str, Any], output_xlsx: str,
+    duration_s: float = 0.0,
 ) -> None:
     """Render the execution summary table, LLM telemetry, and deliverable note."""
     table = Table(title="FrontierAtlas Pipeline Execution Summary")
@@ -577,6 +614,7 @@ def _render_summary(
         ("Fresh Job Postings (Phase II)", len(jobs), _phase2_status(len(jobs))),
         ("Knowledge Graph Nodes", metrics["total_nodes"], "✅ Connected"),
         ("Knowledge Graph Edges", metrics["total_edges"], "✅ Connected"),
+        ("Total runtime", _format_duration(duration_s), "✅ Complete"),
     ]
     for label, count, status in rows:
         table.add_row(label, str(count), status)
@@ -593,6 +631,7 @@ async def run_pipeline(
     upload_sheets: bool = False,
     progress_interval: float = 180.0,
     fresh: bool = False,
+    report_path: Optional[str] = None,
 ):
     """Execute async pipeline phases and export structured deliverables."""
     loop = asyncio.get_running_loop()
@@ -614,7 +653,8 @@ async def run_pipeline(
     try:
         collected = await _run_crawlers(run_phase1, run_phase2, target_count, reset_wal=fresh)
     except asyncio.CancelledError:
-        _report_interrupted(run_id, run_started, target_count, run_phase1, run_phase2, output_dir=out_dir)
+        _report_interrupted(run_id, run_started, target_count, run_phase1, run_phase2,
+                            output_dir=out_dir, report_path=report_path)
         raise
     finally:
         await _cancel_background_tasks(monitor_task, cache_save_task)
@@ -634,12 +674,13 @@ async def run_pipeline(
     metrics = await _run_exports(startups=startups, products=products, papers=papers,
                                  jobs=jobs, news=news, logs=logs, output_xlsx=output_xlsx)
     _render_summary(run_phase1, run_phase2, target_count, startups, products, papers,
-                    news, jobs, metrics, output_xlsx)
+                    news, jobs, metrics, output_xlsx, duration_s=time.monotonic() - run_started)
 
     return await _finalize_run(
         run_id, run_started, run_phase1, run_phase2, target_count,
         upload_sheets, startups, products, papers, news, jobs, logs,
         output_dir=out_dir,
+        report_path=report_path,
     )
 
 

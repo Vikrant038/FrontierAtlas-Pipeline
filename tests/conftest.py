@@ -36,3 +36,52 @@ def isolate_run_state(tmp_path, monkeypatch):
     production exports/run_state.json and surfacing phantom stale-source warnings.
     """
     monkeypatch.setattr("src.config.settings.run_state_path", str(tmp_path / "run_state.json"))
+
+
+@pytest.fixture(autouse=True)
+def isolate_run_report(tmp_path, monkeypatch):
+    """Redirect run report to a per-test temp file.
+
+    Prevents test runs from clobbering production exports/run_report.json.
+    """
+    monkeypatch.setattr("src.config.settings.run_report_path", str(tmp_path / "run_report.json"))
+
+
+@pytest.fixture(autouse=True)
+def isolate_entity_cache(tmp_path, monkeypatch):
+    """Redirect entity resolver cache to a per-test temp file.
+
+    Prevents test runs from modifying production exports/canonical_registry.json.
+    """
+    from src.resolution.normalizer import entity_resolver
+    monkeypatch.setattr(entity_resolver, "cache_path", str(tmp_path / "canonical_registry.json"))
+
+
+@pytest.fixture(autouse=True)
+def assert_exports_untouched():
+    """Regression guard: assert that no test writes to or modifies the production exports/ directory."""
+    from pathlib import Path
+    exports_dir = Path("exports")
+    before_state = {}
+    if exports_dir.exists():
+        for p in exports_dir.rglob("*"):
+            if p.is_file():
+                try:
+                    stat = p.stat()
+                    before_state[str(p)] = (stat.st_mtime_ns, stat.st_size)
+                except OSError:
+                    pass
+
+    yield
+
+    if exports_dir.exists():
+        for p in exports_dir.rglob("*"):
+            if p.is_file():
+                try:
+                    stat = p.stat()
+                    curr = (stat.st_mtime_ns, stat.st_size)
+                    prev = before_state.get(str(p))
+                    assert prev is not None, f"Test created unexpected file in production exports/: {p}"
+                    assert prev == curr, f"Test modified production file in exports/: {p}"
+                except OSError:
+                    pass

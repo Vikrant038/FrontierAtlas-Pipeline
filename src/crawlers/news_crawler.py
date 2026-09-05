@@ -357,11 +357,14 @@ class NewsCrawler(AsyncBaseCrawler):
 
         # Persist summary telemetry for audit and verification
         try:
-            os.makedirs("exports", exist_ok=True)
-            tmp_path = "exports/news_summary_telemetry.json.tmp"
+            from src.config import settings
+            target_dir = os.path.dirname(settings.run_report_path) or "exports"
+            os.makedirs(target_dir, exist_ok=True)
+            tmp_path = os.path.join(target_dir, "news_summary_telemetry.json.tmp")
+            target_file = os.path.join(target_dir, "news_summary_telemetry.json")
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self.stats, f, indent=2)
-            os.replace(tmp_path, "exports/news_summary_telemetry.json")
+            os.replace(tmp_path, target_file)
         except Exception as exc:
             logger.debug(f"Could not persist news summary telemetry: {exc}")
 

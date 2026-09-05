@@ -350,9 +350,13 @@ class MultiTierLLMEngine:
         """Return a copy of the current tier usage counts."""
         return dict(self.tier_usage)
 
-    def save_tier_telemetry(self, filepath: str = "exports/llm_tier_telemetry.json") -> str:
+    def save_tier_telemetry(self, filepath: Optional[str] = None) -> str:
         """Persist tier usage metrics to JSON for audit and evaluation."""
         import os
+        from src.config import settings
+        if filepath is None:
+            target_dir = os.path.dirname(settings.run_report_path) or "exports"
+            filepath = os.path.join(target_dir, "llm_tier_telemetry.json")
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(self.get_tier_usage(), f, indent=2)

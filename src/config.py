@@ -156,6 +156,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     enable_wal: bool = False
     run_state_path: str = "exports/run_state.json"
+    run_report_path: str = "exports/run_report.json"
 
     # Google Sheets Deliverable Export (gspread)
     google_service_account_path: Optional[str] = None

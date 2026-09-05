@@ -825,3 +825,116 @@ def test_run_report_includes_sheets_status_freshness_and_stale_sources(tmp_path,
     stale = {(s["crawler"], s["source"]) for s in report["stale_sources"]}
     assert ("news", "DeadFeed") in stale
     assert ("news", "HealthyFeed") not in stale
+
+
+def test_pipeline_writes_injected_report_path_not_production(tmp_path, monkeypatch):
+    # Arrange - regression guard: run report writes must respect settings.run_report_path
+    # or injected report_path, never clobbering production exports/run_report.json.
+    custom_report = tmp_path / "custom_dir" / "report.json"
+    monkeypatch.setattr("src.config.settings.run_report_path", str(custom_report))
+    prod_path = Path("exports/run_report.json")
+    prod_before = prod_path.read_bytes() if prod_path.exists() else None
+
+    # Act 1 - direct call to _write_run_report without output_dir
+    path = cli._write_run_report(
+        run_id="test-isolation",
+        duration_s=5.0,
+        status="completed",
+        counts={"startups": 1, "products": 1, "papers": 1, "news": 0, "jobs": 0},
+        target_count=1,
+        resolution_log_rows=0,
+        phase1=True,
+        phase2=False,
+    )
+
+    # Assert 1 - report landed on injected path, production untouched
+    assert path == str(custom_report)
+    assert custom_report.exists()
+    assert json.loads(custom_report.read_text())["run_id"] == "test-isolation"
+    prod_after = prod_path.read_bytes() if prod_path.exists() else None
+    assert prod_after == prod_before
+
+
+def test_run_report_duration_completed_and_interrupted(tmp_path):
+    # Arrange - test both completed (e.g. ~22 min / 1320.4s) and interrupted runs
+    report_completed = tmp_path / "completed_report.json"
+    report_interrupted = tmp_path / "interrupted_report.json"
+
+    # Act 1 - completed run duration accounting (~22 min)
+    cli._write_run_report(
+        run_id="run-22min",
+        duration_s=1320.4,
+        status="completed",
+        counts={"startups": 1000, "products": 1000, "papers": 1000, "news": 39, "jobs": 11},
+        target_count=1000,
+        resolution_log_rows=1589,
+        phase1=True,
+        phase2=True,
+        report_path=str(report_completed),
+    )
+
+    # Act 2 - interrupted run duration accounting (e.g. elapsed 45.3s)
+    cli._write_run_report(
+        run_id="run-interrupted",
+        duration_s=45.3,
+        status="interrupted",
+        counts={"startups": 250, "products": 180, "papers": 300, "news": 0, "jobs": 0},
+        target_count=1000,
+        resolution_log_rows=40,
+        phase1=True,
+        phase2=True,
+        report_path=str(report_interrupted),
+    )
+
+    # Assert
+    data_completed = json.loads(report_completed.read_text())
+    assert data_completed["duration_seconds"] == 1320.4
+    assert data_completed["status"] == "completed"
+
+    data_interrupted = json.loads(report_interrupted.read_text())
+    assert data_interrupted["duration_seconds"] == 45.3
+    assert data_interrupted["status"] == "interrupted"
+
+
+def test_render_summary_surfaces_runtime(capsys):
+    # Arrange
+    metrics = {"total_nodes": 4567, "total_edges": 1656}
+    duration_22min = 1320.0  # 22 minutes
+
+    # Act 1 - render summary with ~22 min duration
+    cli._render_summary(
+        run_phase1=True,
+        run_phase2=True,
+        target_count=1000,
+        startups=[1] * 1000,
+        products=[1] * 1000,
+        papers=[1] * 1000,
+        news=[1] * 39,
+        jobs=[1] * 11,
+        metrics=metrics,
+        output_xlsx="exports/test.xlsx",
+        duration_s=duration_22min,
+    )
+    captured = capsys.readouterr().out
+
+    # Assert 1 - Total runtime row is surfaced with human-friendly string
+    assert "Total runtime" in captured
+    assert "~22 min" in captured
+
+    # Act 2 - seconds formatting when < 60s
+    cli._render_summary(
+        run_phase1=False,
+        run_phase2=False,
+        target_count=0,
+        startups=[],
+        products=[],
+        papers=[],
+        news=[],
+        jobs=[],
+        metrics=metrics,
+        output_xlsx="exports/test.xlsx",
+        duration_s=45.2,
+    )
+    captured_seconds = capsys.readouterr().out
+    assert "Total runtime" in captured_seconds
+    assert "45.2s" in captured_seconds
