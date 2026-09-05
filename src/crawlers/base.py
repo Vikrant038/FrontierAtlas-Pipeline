@@ -22,6 +22,12 @@ from tenacity import (
 )
 
 from src.config import settings
+
+try:
+    import h2  # noqa: F401
+    _HTTP2_AVAILABLE = True
+except ImportError:
+    _HTTP2_AVAILABLE = False
 from src.crawlers.anti_bot import (
     _block_cooldown_until,
     _block_history,
@@ -140,7 +146,7 @@ class AsyncBaseCrawler(ABC):
                 timeout=self.timeout,
                 limits=limits,
                 follow_redirects=True,
-                http2=True,
+                http2=_HTTP2_AVAILABLE,
             )
         return self._client
 
