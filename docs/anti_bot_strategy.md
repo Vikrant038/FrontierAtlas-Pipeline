@@ -11,7 +11,7 @@
 >   detection (`src/crawlers/anti_bot.py`), and time-reset quota backoffs. Note: API
 >   endpoints run with `allow_tls_fallback=False` — no browser storm on GitHub/API 403s.
 > - **Tier B (residential proxy pools)**: ❌ not implemented — deferred (needs a funded
->   provider; see the deferred list in `ARCHITECTURE_REVIEW.md`).
+>   provider; see "Production Roadmap" in `docs/architecture.md`).
 > - **Tier C (managed headless grid)**: ◐ partial — local `camoufox` fallback exists
 >   (`_escalate_camoufox`, `base.py`), but it is an exception-path demo/fallback node,
 >   not a pooled grid; never routed for bulk feeds.
