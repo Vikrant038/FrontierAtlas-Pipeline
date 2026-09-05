@@ -11,6 +11,7 @@ import openpyxl
 from datetime import datetime, timezone
 
 from src.exporters.base import ENTITY_SPECS
+from src.exporters.csv_exporter import CSVExporter
 from src.exporters.excel_exporter import ExcelExporter
 from src.exporters.graph_builder import KnowledgeGraphBuilder
 from src.schemas.entities import (
@@ -410,7 +411,6 @@ def test_date_inferred_flag_flows_to_exports():
         ),
     ]
     exporter = ExcelExporter()
-    csv_exporter = CSVExporter()
     with tempfile.TemporaryDirectory() as tmp_dir:
         xlsx = os.path.join(tmp_dir, "out.xlsx")
         exporter.export(filepath=xlsx, news=news, jobs=jobs)
