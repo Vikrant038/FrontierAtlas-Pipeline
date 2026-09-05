@@ -126,7 +126,6 @@ Notes:
   - `{startups,products,research_papers,jobs,news}.csv` + `entity_mapping_log.csv`
   - `run_report.json` — status, counts, LLM tier usage, and anti-bot telemetry
   - `run_state.json` — cross-run novelty state & per-source freshness history
-- **Submission Form**: [https://forms.gle/8bnrg78Ki4E25RAk8](https://forms.gle/8bnrg78Ki4E25RAk8)
 
 ## Testing & coverage
 
@@ -148,4 +147,3 @@ coverage run --branch -m pytest tests/ -q && coverage report
 ## Docs
 
 - `docs/anti_bot_strategy.md` — the 4-tier anti-bot target architecture with an implemented-vs-planned status annotation.
-- `ARCHITECTURE_REVIEW.md` (local, gitignored) — full multi-phase review record, deferred milestones, and the 500k supply-adapter plan.
