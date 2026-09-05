@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/Tests-350%20passing-brightgreen?logo=pytest&logoColor=white)
+![Tests](https://img.shields.io/badge/Tests-382%20passing-brightgreen?logo=pytest&logoColor=white)
 ![Coverage](https://img.shields.io/badge/Coverage-80%25%20gate-yellow?logo=githubactions&logoColor=white)
 ![Async](https://img.shields.io/badge/asyncio-native-464646?logo=python&logoColor=white)
 ![Pydantic](https://img.shields.io/badge/pydantic-v2-E92063?logo=pydantic&logoColor=white)
@@ -104,6 +104,9 @@ python -m src.cli --phase 1 --target 1000
 # Everything, including the 24h news/jobs ingestion
 python -m src.cli --phase all --target 1000
 
+# Clean run from scratch (bypasses/truncates WAL checkpoints & resets 24h freshness history)
+python -m src.cli --phase all --target 1000 --sheets --fresh
+
 # Custom deliverable path + live progress every 60s (0 disables)
 python -m src.cli --phase all --target 1000 --output exports/run.xlsx --progress-interval 60
 
@@ -113,9 +116,12 @@ python -m src.cli --phase all --target 1000 --sheets
 
 Notes:
 - Defaults: `--phase all`, `--target 1000`, output `exports/FrontierAtlas_Intelligence.xlsx` (`exports/phase1_test.xlsx` for `--phase 1`).
+- `--fresh` flag: Skips WAL checkpoint recovery, truncates existing WAL files (`exports/wal/*.jsonl`), and resets per-source 24h freshness history (`exports/run_state.json`) so the pipeline executes from a clean slate without stale-source false alarms.
 - Exit code is `0` on completion, `1` on Phase-I shortfall (target not reached). `exports/run_report.json` carries the same signal (`status`) plus telemetry for automation/alerting.
 - Targets ≥1,000 auto-enable WAL checkpointing; an interrupted run prints guidance and resumes on the next invocation.
 - `--progress-interval N` prints a live per-vertical table (collected/target/ETA) every N seconds.
+- Real-time research paper enrichment: The progress monitor tracks dual-phase status during live GitHub star lookups (e.g., `papers │ 1000/1000 collected │ enriching stars 412/605 (68%) │ ETA ~7 min`).
+- Wall-clock runtime reporting: Execution summary surfaces total runtime (`Total runtime │ ~22 min │ ✅ Complete`) and records exact elapsed seconds in `exports/run_report.json`.
 
 ## Deliverables & Submission Links
 
@@ -142,7 +148,7 @@ pytest --cov=src --cov-report=term-missing:skip-covered --cov-fail-under=80
 coverage run --branch -m pytest tests/ -q && coverage report
 ```
 
-**Current baseline (verified):** 350 tests passing; **96% statements / 90% branches** on `src/` (75 partial branches). CI (`.github/workflows/ci.yml`) enforces `--cov-fail-under=80` (currently at ~95%) on every push/PR to `main`/`develop`.
+**Current baseline (verified):** 382 tests passing; **96% statements / 90% branches** on `src/` (75 partial branches). CI (`.github/workflows/ci.yml`) enforces `--cov-fail-under=80` (currently at ~95%) on every push/PR to `main`/`develop`.
 
 ## Docs
 
