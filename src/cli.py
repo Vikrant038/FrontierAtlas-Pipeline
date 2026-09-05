@@ -78,6 +78,40 @@ def _warn_stale_sources() -> None:
                 )
 
 
+def _stale_sources_snapshot() -> List[Dict[str, Any]]:
+    """Stale-source entries ({crawler, source, consecutive_zero_runs}) for sources with
+    >=2 consecutive zero-fresh runs — the run-report form of _warn_stale_sources."""
+    stale: List[Dict[str, Any]] = []
+    for crawler_name in ("news", "jobs"):
+        for source, entry in load_source_freshness(crawler_name).items():
+            history = entry.get("recent_fresh_counts") if isinstance(entry, dict) else None
+            if not isinstance(history, list):
+                continue
+            trailing_zeros = 0
+            for count in reversed(history):
+                if count == 0:
+                    trailing_zeros += 1
+                else:
+                    break
+            if trailing_zeros >= 2:
+                stale.append({"crawler": crawler_name, "source": source, "consecutive_zero_runs": trailing_zeros})
+    return stale
+
+
+def _collect_source_freshness() -> Dict[str, Dict[str, int]]:
+    """Per-crawler {source: latest fresh count} for the run report."""
+    out: Dict[str, Dict[str, int]] = {}
+    for crawler_name in ("news", "jobs"):
+        counts: Dict[str, int] = {}
+        for source, entry in load_source_freshness(crawler_name).items():
+            history = entry.get("recent_fresh_counts") if isinstance(entry, dict) else None
+            if isinstance(history, list) and history:
+                counts[source] = history[-1]
+        if counts:
+            out[crawler_name] = counts
+    return out
+
+
 def _write_run_report(
     run_id: str,
     duration_s: float,
@@ -87,6 +121,7 @@ def _write_run_report(
     resolution_log_rows: int,
     phase1: bool,
     phase2: bool,
+    sheets_upload: str = "not_requested",
     output_dir: str = "exports",
 ) -> str:
     """Persist a machine-readable run report (CI/cron alerting primitive)."""
@@ -100,6 +135,9 @@ def _write_run_report(
         "collected": counts,
         "resolution_log_rows": resolution_log_rows,
         "llm_tier_usage": llm_engine.get_tier_usage(),
+        "sheets_upload": sheets_upload,
+        "source_freshness": _collect_source_freshness(),
+        "stale_sources": _stale_sources_snapshot(),
         "anti_bot": anti_bot_snapshot(active_crawlers=list(_ACTIVE_CRAWLERS.values())),
     }
     os.makedirs(output_dir, exist_ok=True)
@@ -474,8 +512,9 @@ async def _finalize_run(
     news: List[Any], jobs: List[Any], logs: List[Any], output_dir: str = "exports",
 ) -> bool:
     """Optional Sheets upload, stale-source warnings, shortfall gating, and the run report."""
+    sheets_upload = "not_requested"
     if upload_sheets:
-        await asyncio.to_thread(
+        sheets_upload = await asyncio.to_thread(
             _handle_sheets_upload,
             startups=startups,
             products=products,
@@ -503,6 +542,7 @@ async def _finalize_run(
         resolution_log_rows=len(logs),
         phase1=run_phase1,
         phase2=run_phase2,
+        sheets_upload=sheets_upload,
         output_dir=output_dir,
     )
     return not shortfall

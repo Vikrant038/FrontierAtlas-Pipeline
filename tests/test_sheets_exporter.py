@@ -4,11 +4,15 @@ Strictly offline and hermetic using pytest-mock per CODING_STANDARDS.md Pillar 7
 """
 
 from unittest.mock import MagicMock
+from datetime import datetime, timezone
+
 import pytest
 
 from src.exporters.base import ENTITY_SPECS
 from src.exporters.sheets_exporter import GoogleSheetsExporter
 from src.schemas.entities import (
+    NewsContent,
+    NewsRecord,
     PricingModelEnum,
     ProductContent,
     ProductRecord,
@@ -275,3 +279,51 @@ def test_execute_values_update_retries_on_transient_error(tmp_path, monkeypatch)
     # Assert - called twice, succeeded on 2nd attempt
     assert call_count == 2
     assert mock_spreadsheet.values_update.call_count == 2
+
+
+def test_upload_dataset_caps_oversized_cells_413_defense():
+    # G2: a single giant cell must be truncated before reaching the Sheets API,
+    # otherwise one oversized article body fails its whole 500-row batch.
+    from src.exporters import sheets_exporter as se
+
+    giant = "x" * (se.MAX_CELL_CHARS + 5000)
+
+    class FakeWorksheet:
+        def __init__(self):
+            self.title = "News_24h"
+
+    class FakeSpreadsheet:
+        def __init__(self):
+            self.captured = []
+
+        def worksheets(self):
+            return []
+
+        def add_worksheet(self, title, rows, cols):
+            ws = FakeWorksheet()
+            ws.title = title
+            return ws
+
+        def values_update(self, cell_range, params=None, body=None):
+            self.captured.append(body["values"])
+
+    exporter = GoogleSheetsExporter()
+    record = NewsRecord(
+        source=SourceMetadata(name="HN AI", url="https://example.com/giant"),
+        content=NewsContent(
+            title="Giant body",
+            published_date=datetime.now(timezone.utc),
+            full_text=giant,
+        ),
+    )
+    sheet = FakeSpreadsheet()
+    exporter._upload_dataset(sheet, "news", [record])
+
+    flattened = [cell for chunk in sheet.captured for row in chunk for cell in row]
+    assert all(len(c) <= se.MAX_CELL_CHARS for c in flattened if isinstance(c, str))
+
+    # Direct cap behavior: only strings above the cap are truncated, exactly to it.
+    assert se._cap_cell("y" * (se.MAX_CELL_CHARS + 1)) == "y" * se.MAX_CELL_CHARS
+    assert se._cap_cell("short") == "short"
+    assert se._cap_cell(12345) == 12345
+    assert se._cap_cell(None) is None

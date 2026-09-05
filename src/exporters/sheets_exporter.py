@@ -32,6 +32,19 @@ from src.utils.logger import logger
 
 BATCH_SIZE = settings.sheets_batch_size  # configurable for quota tuning at scale
 DEFAULT_SPREADSHEET_TITLE = "FrontierAtlas AI Intelligence"
+# Per-cell character cap for the Sheets API (413 defense): Google rejects requests
+# whose cells exceed its per-cell limit, and a giant article body would otherwise
+# fail its whole 500-row batch after 5 non-transient retries. Well below the API
+# ceiling, generous for any summary or text field the pipeline produces.
+MAX_CELL_CHARS = 20_000
+
+
+def _cap_cell(value: Any) -> Any:
+    """Cap string cell values at MAX_CELL_CHARS; everything else passes through."""
+    if isinstance(value, str) and len(value) > MAX_CELL_CHARS:
+        logger.warning(f"Sheets cell capped from {len(value)} to {MAX_CELL_CHARS} chars (413 defense).")
+        return value[:MAX_CELL_CHARS]
+    return value
 
 
 def _dims(num_rows: int, num_cols: int) -> Tuple[int, int]:
@@ -296,10 +309,13 @@ class GoogleSheetsExporter:
             return None
 
     def _upload_dataset(self, spreadsheet, key: str, records: List[Any]) -> None:
-        """Prepare and batch-write one dataset tab (headers + serialized rows)."""
+        """Prepare and batch-write one dataset tab (headers + serialized rows).
+        Cell values are capped at MAX_CELL_CHARS: Sheets rejects requests with
+        oversized cells (413-class), and a single giant article body would fail
+        its whole 500-row batch after 5 futile non-transient retries."""
         tab_title, _, headers = ENTITY_SPECS[key]
         record_rows = [r.to_row() if hasattr(r, "to_row") else r for r in records]
-        all_rows = [headers] + record_rows
+        all_rows = [[_cap_cell(v) for v in row] for row in ([headers] + record_rows)]
         self._prepare_worksheet(
             spreadsheet=spreadsheet,
             title=tab_title,

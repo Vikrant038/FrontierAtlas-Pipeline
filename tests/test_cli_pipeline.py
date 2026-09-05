@@ -7,6 +7,7 @@ test exercises the real orchestration, exporters, and report machinery.
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import csv
@@ -793,3 +794,34 @@ async def test_run_pipeline_fresh_flag_truncates_wal_and_resets_freshness(tmp_pa
     assert "DeadFeed" not in freshness
 
 
+
+
+def test_run_report_includes_sheets_status_freshness_and_stale_sources(tmp_path, monkeypatch):
+    # P5-2: the run report must carry sheets_upload status, per-source fresh counts,
+    # and the stale-source list so cron/CI can alert without reading console output.
+    from src import cli as cli_mod
+    from src.utils import run_state as rs
+
+    monkeypatch.setattr("src.config.settings.run_state_path", str(tmp_path / "run_state.json"))
+    rs.save_source_freshness("news", {"HealthyFeed": 4, "DeadFeed": 0})
+    rs.save_source_freshness("news", {"HealthyFeed": 3, "DeadFeed": 0})
+
+    path = cli_mod._write_run_report(
+        run_id="test-run",
+        duration_s=1.0,
+        status="completed",
+        counts={"startups": 1, "products": 1, "papers": 1, "news": 2, "jobs": 0},
+        target_count=1,
+        resolution_log_rows=0,
+        phase1=True,
+        phase2=True,
+        sheets_upload="skipped",
+        output_dir=str(tmp_path),
+    )
+    report = json.loads(Path(path).read_text())
+
+    assert report["sheets_upload"] == "skipped"
+    assert report["source_freshness"]["news"]["HealthyFeed"] == 3
+    stale = {(s["crawler"], s["source"]) for s in report["stale_sources"]}
+    assert ("news", "DeadFeed") in stale
+    assert ("news", "HealthyFeed") not in stale
