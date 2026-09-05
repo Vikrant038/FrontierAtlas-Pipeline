@@ -411,6 +411,96 @@ def test_papers_enrichment_details_edge_cases():
 
 
 @pytest.mark.asyncio
+async def test_progress_monitor_retains_completed_crawler_counts(monkeypatch, capsys):
+    """Assert progress table retains final counts and marks 'Done' after crawlers complete."""
+    monkeypatch.setattr(cli, "console", cli.Console(width=120))
+    cli._reset_crawler_state()
+
+    cli._mark_crawler_done("startups", 1000, 1000)
+    cli._mark_crawler_done("products", 1000, 1000)
+    cli._mark_crawler_done("papers", 1000, 1000)
+    cli._mark_crawler_done("news", 39, None)
+    cli._mark_crawler_done("jobs", 11, None)
+
+    assert len(cli._ACTIVE_CRAWLERS) == 0
+    assert cli._is_crawler_done("startups")
+    assert cli._is_crawler_done("news")
+
+    monitor_task, cache_task = cli._start_background_tasks(0.02, run_phase1=True, run_phase2=True)
+    await asyncio.sleep(0.08)
+    await cli._cancel_background_tasks(monitor_task, cache_task)
+    out = capsys.readouterr().out
+
+    assert "1000 (100%)" in out
+    assert "39" in out
+    assert "11" in out
+    assert "✅ Done" in out
+
+    lines = [l for l in out.splitlines() if "│" in l]
+    for line in lines:
+        parts = [p.strip() for p in line.split("│")]
+        if len(parts) >= 6 and parts[1] in ("startups", "products", "papers"):
+            assert parts[2] == "1000 (100%)"
+            assert "— (24h window)" not in line
+            assert parts[5] == "✅ Done"
+        if len(parts) >= 6 and parts[1] == "news":
+            assert parts[2] == "39"
+            assert parts[3] == "— (24h window)"
+            assert parts[5] == "✅ Done"
+        if len(parts) >= 6 and parts[1] == "jobs":
+            assert parts[2] == "11"
+            assert parts[3] == "— (24h window)"
+            assert parts[5] == "✅ Done"
+
+
+@pytest.mark.asyncio
+async def test_progress_monitor_fallback_target_labels_by_vertical(monkeypatch, capsys):
+    """Label news/jobs as (24h window) and target verticals as (target) when target is None."""
+    monkeypatch.setattr(cli, "console", cli.Console(width=120))
+    cli._reset_crawler_state()
+
+    monitor_task, cache_task = cli._start_background_tasks(0.02, run_phase1=True, run_phase2=True)
+    await asyncio.sleep(0.08)
+    await cli._cancel_background_tasks(monitor_task, cache_task)
+    out = capsys.readouterr().out
+
+    lines = out.splitlines()
+    for line in lines:
+        if any(k in line for k in ("startups", "products", "papers")):
+            assert "— (target)" in line
+            assert "— (24h window)" not in line
+        if any(k in line for k in ("news", "jobs")):
+            assert "— (24h window)" in line
+            assert "— (target)" not in line
+
+
+@pytest.mark.asyncio
+async def test_crawl_marks_crawler_done_on_completion():
+    """_crawl must register completed count and target in _COMPLETED_CRAWLERS upon exit."""
+    cli._reset_crawler_state()
+
+    class DummyCrawler:
+        def __init__(self, target_count=1000):
+            self.target_count = target_count
+            self.collected = [1] * 1000
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        async def crawl(self):
+            return self.collected
+
+    results = await cli._crawl("startups", DummyCrawler, target_count=1000)
+    assert len(results) == 1000
+    assert "startups" not in cli._ACTIVE_CRAWLERS
+    assert cli._is_crawler_done("startups")
+    assert cli._crawler_progress("startups") == (1000, 1000)
+
+
+@pytest.mark.asyncio
 async def test_start_background_tasks_disabled_monitor(monkeypatch):
     monkeypatch.setattr(cli, "_ACTIVE_CRAWLERS", {})
     monitor_task, cache_task = cli._start_background_tasks(0.0, True, True)

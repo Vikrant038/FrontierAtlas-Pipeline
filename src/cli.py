@@ -121,9 +121,30 @@ async def _periodic_cache_save(interval: float = 600.0) -> None:
 console = Console()
 
 
-# Live crawler registry: _progress_monitor polls these instances mid-run to report
-# collected-vs-target counts without waiting for a crawler to finish.
+TARGET_VERTICALS = {"papers", "startups", "products"}
+WINDOW_VERTICALS = {"news", "jobs"}
+
+# Live and completed crawler registries: _progress_monitor polls these instances
+# to report collected-vs-target counts without resetting counts when a vertical completes.
 _ACTIVE_CRAWLERS: Dict[str, Any] = {}
+_COMPLETED_CRAWLERS: Dict[str, Dict[str, Any]] = {}
+
+
+def _mark_crawler_done(name: str, count: int, target: Optional[int] = None) -> None:
+    """Retain final counts and mark a crawler completed so progress reporting persists."""
+    _COMPLETED_CRAWLERS[name] = {"count": count, "target": target, "done": True}
+    _ACTIVE_CRAWLERS.pop(name, None)
+
+
+def _is_crawler_done(name: str) -> bool:
+    """True when the vertical has completed execution."""
+    return name in _COMPLETED_CRAWLERS
+
+
+def _reset_crawler_state() -> None:
+    """Clear active and completed crawler registries (for fresh runs and tests)."""
+    _ACTIVE_CRAWLERS.clear()
+    _COMPLETED_CRAWLERS.clear()
 
 
 async def _crawl(name: str, crawler_cls, **kwargs):
@@ -131,23 +152,33 @@ async def _crawl(name: str, crawler_cls, **kwargs):
     async with crawler_cls(**kwargs) as crawler:
         _ACTIVE_CRAWLERS[name] = crawler
         try:
-            return await crawler.crawl()
+            results = await crawler.crawl()
+            count = len(results) if isinstance(results, list) else len(getattr(crawler, "collected", []))
+            target = getattr(crawler, "target_count", kwargs.get("target_count"))
+            _mark_crawler_done(name, count, target)
+            return results
         finally:
+            if name not in _COMPLETED_CRAWLERS:
+                count, target = _crawler_progress(name)
+                _mark_crawler_done(name, count, target or kwargs.get("target_count"))
             _ACTIVE_CRAWLERS.pop(name, None)
 
 
 def _crawler_progress(name: str) -> Tuple[int, Optional[int]]:
-    """Return (collected, target) for a live crawler; (0, None) when not active."""
+    """Return (collected, target) for a live crawler; retained final counts when complete; (0, None) otherwise."""
     crawler = _ACTIVE_CRAWLERS.get(name)
-    if crawler is None:
-        return 0, None
-    collected = getattr(crawler, "collected", None)
-    if collected is None:
-        stats = getattr(crawler, "stats", None)  # news: per-source processed totals
-        if stats:
-            return sum(s.get("total", 0) for s in stats.values()), None
-        return getattr(crawler, "_live_count", 0), None  # jobs: fresh records built
-    return len(collected), getattr(crawler, "target_count", None)
+    if crawler is not None:
+        collected = getattr(crawler, "collected", None)
+        if collected is None:
+            stats = getattr(crawler, "stats", None)  # news: per-source processed totals
+            if stats:
+                return sum(s.get("total", 0) for s in stats.values()), None
+            return getattr(crawler, "_live_count", 0), None  # jobs: fresh records built
+        return len(collected), getattr(crawler, "target_count", None)
+    completed = _COMPLETED_CRAWLERS.get(name)
+    if completed is not None:
+        return completed.get("count", 0), completed.get("target")
+    return 0, None
 
 
 def _papers_enrichment_details(crawler: Any) -> Optional[Tuple[str, str, str]]:
@@ -195,14 +226,18 @@ async def _progress_monitor(interval: float, run_phase1: bool, run_phase2: bool)
         for n in names:
             collected, target = _crawler_progress(n)
             crawler = _ACTIVE_CRAWLERS.get(n)
+            is_done = _is_crawler_done(n)
             enrichment_info = _papers_enrichment_details(crawler) if n == "papers" else None
             if target:
                 remaining = max(0, target - collected)
                 pct = f" ({100.0 * collected / target:.0f}%)"
-                eta = ""
-                if collected > 0 and elapsed_min > 0:
-                    rate = collected / elapsed_min
-                    eta = f"~{remaining / rate:.0f} min" if rate > 0 else ""
+                if is_done:
+                    eta = "✅ Done" if remaining == 0 else f"⚠️ Shortfall ({collected}/{target})"
+                else:
+                    eta = ""
+                    if collected > 0 and elapsed_min > 0:
+                        rate = collected / elapsed_min
+                        eta = f"~{remaining / rate:.0f} min" if rate > 0 else ""
 
                 if enrichment_info:
                     enrich_label, enrich_rem, enrich_eta = enrichment_info
@@ -226,7 +261,9 @@ async def _progress_monitor(interval: float, run_phase1: bool, run_phase2: bool)
                 else:
                     table.add_row(n, f"{collected}{pct}", str(target), str(remaining), eta)
             else:
-                table.add_row(n, str(collected), "— (24h window)", "—", "")
+                fallback_target = "— (target)" if n in TARGET_VERTICALS else "— (24h window)"
+                eta = "✅ Done" if is_done else ""
+                table.add_row(n, str(collected), fallback_target, "—", eta)
         console.print(table)
 
 
@@ -525,6 +562,8 @@ async def run_pipeline(
     if fresh:
         console.print("[yellow]--fresh flag enabled: resetting per-source freshness history and truncating WAL checkpoints.[/yellow]")
         reset_source_freshness()
+
+    _reset_crawler_state()
 
     run_started = time.monotonic()
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
