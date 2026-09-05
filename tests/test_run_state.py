@@ -144,3 +144,31 @@ def test_crawler_freshness_writes_injected_path_not_production(tmp_path, monkeyp
     # Production file untouched byte-for-byte
     prod_after = open(prod_path).read() if os.path.exists(prod_path) else None
     assert prod_after == prod_before
+
+
+def test_reset_source_freshness_all_and_targeted(tmp_path):
+    # Arrange
+    state_path = str(tmp_path / "run_state.json")
+    save_seen_keys("news", {"https://news.example/1"}, state_path)
+    save_source_freshness("news", {"TechCrunch AI": 0, "DeadFeed": 0}, state_path)
+    save_source_freshness("jobs", {"RemoteOK AI": 0}, state_path)
+
+    assert len(load_source_freshness("news", state_path)) == 2
+    assert len(load_source_freshness("jobs", state_path)) == 1
+
+    # Act 1 - reset only news_freshness
+    from src.utils.run_state import reset_source_freshness
+    reset_source_freshness("news", state_path=state_path)
+
+    # Assert 1 - news_freshness cleared, jobs_freshness and seen keys intact
+    assert load_source_freshness("news", state_path) == {}
+    assert len(load_source_freshness("jobs", state_path)) == 1
+    assert load_seen_keys("news", state_path) == {"https://news.example/1"}
+
+    # Act 2 - reset all freshness records
+    reset_source_freshness(state_path=state_path)
+
+    # Assert 2 - all freshness cleared, seen keys still intact
+    assert load_source_freshness("jobs", state_path) == {}
+    assert load_seen_keys("news", state_path) == {"https://news.example/1"}
+

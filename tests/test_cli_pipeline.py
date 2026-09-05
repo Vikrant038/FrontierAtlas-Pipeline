@@ -94,12 +94,15 @@ def _make_records() -> dict:
     }
 
 
-class _FakeCrawler:
+from src.crawlers.base import TargetedCrawler
+
+
+class _FakeCrawler(TargetedCrawler):
     """Async-context-manager crawler stand-in returning a fixed record list."""
 
     def __init__(self, records, **kwargs):
+        super().__init__(**kwargs)
         self.records = records
-        self.target_count = kwargs.get("target_count", 0)
         self.collected = list(records)
 
     async def __aenter__(self):
@@ -109,6 +112,7 @@ class _FakeCrawler:
         return False
 
     async def crawl(self):
+        self.recover_from_wal()
         return list(self.records)
 
 
@@ -122,9 +126,10 @@ def _patch_crawler_classes(monkeypatch, records: dict):
             "news": "NewsCrawler",
             "jobs": "JobsCrawler",
         }[name]
+        fake_cls = type(cls_name, (_FakeCrawler,), {})
         monkeypatch.setattr(
             cli, cls_name,
-            lambda records=records[name], **kwargs: _FakeCrawler(records),
+            lambda records=records[name], fake_cls=fake_cls, **kwargs: fake_cls(records, **kwargs),
         )
 
 
@@ -211,6 +216,13 @@ def test_cli_main_success_and_shortfall_exit(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert captured["output_xlsx"] == cli.PHASE1_OUTPUT_XLSX
     assert captured["run_phase2"] is False
+    assert captured["fresh"] is False
+
+    # Act 3 - --fresh flag sets fresh=True in run_pipeline kwargs
+    result = runner.invoke(cli.main, ["--phase", "all", "--target", "1000", "--sheets", "--fresh", "--progress-interval", "0"])
+    assert result.exit_code == 0
+    assert captured["fresh"] is True
+    assert captured["upload_sheets"] is True
 
 
 def test_cli_main_shortfall_raises_system_exit(tmp_path, monkeypatch):
@@ -246,6 +258,11 @@ def test_warn_config_matrices(monkeypatch, capsys):
     cli._warn_config(run_phase1=True, upload_sheets=True, target_count=10)
     out = capsys.readouterr().out
     assert "not set" not in out
+
+    # Fresh flag overrides WAL checkpoint message
+    cli._warn_config(run_phase1=True, upload_sheets=False, target_count=1500, fresh=True)
+    out = capsys.readouterr().out
+    assert "--fresh flag set" in out
 
 
 def test_warn_stale_sources_two_zeros_and_recovery(monkeypatch, capsys):
@@ -579,4 +596,42 @@ async def test_run_pipeline_end_to_end_all_phases_composed(tmp_path, monkeypatch
     assert report["collected"]["papers"] >= 2
     assert report["collected"]["news"] >= 1
     assert report["collected"]["jobs"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_fresh_flag_truncates_wal_and_resets_freshness(tmp_path, monkeypatch):
+    """With --fresh passed to run_pipeline: WAL files are truncated and per-source freshness history is reset."""
+    # Arrange
+    wal_dir = tmp_path / "wal"
+    wal_dir.mkdir()
+    wal_file = wal_dir / "researchpaperscrawler_wal.jsonl"
+    wal_file.write_text(json.dumps({"key": "old-paper", "data": {"title": "Old"}}) + "\n", encoding="utf-8")
+    assert wal_file.stat().st_size > 0
+
+    state_path = tmp_path / "run_state.json"
+    from src.utils.run_state import save_source_freshness, load_source_freshness
+    save_source_freshness("news", {"DeadFeed": 0}, state_path=str(state_path))
+    save_source_freshness("news", {"DeadFeed": 0}, state_path=str(state_path))
+    assert len(load_source_freshness("news", state_path=str(state_path))["DeadFeed"]["recent_fresh_counts"]) == 2
+
+    monkeypatch.setattr(cli.settings, "wal_dir", str(wal_dir))
+    monkeypatch.setattr(cli.settings, "run_state_path", str(state_path))
+    _patch_crawler_classes(monkeypatch, _make_records())
+    monkeypatch.setattr(cli, "entity_resolver", SimpleNamespace(save_cache=lambda: None, audit_log=[]))
+
+    out_xlsx = str(tmp_path / "fresh_run.xlsx")
+
+    # Act
+    success = await cli.run_pipeline(
+        run_phase1=True, run_phase2=True, target_count=1,
+        output_xlsx=out_xlsx, progress_interval=0,
+        fresh=True,
+    )
+
+    # Assert
+    assert success is True
+    assert wal_file.read_text(encoding="utf-8") == ""
+    freshness = load_source_freshness("news", state_path=str(state_path))
+    assert "DeadFeed" not in freshness
+
 

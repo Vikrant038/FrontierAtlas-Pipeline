@@ -28,13 +28,13 @@ from src.exporters.sheets_exporter import GoogleSheetsExporter
 from src.llm.fallback_chain import llm_engine
 from src.resolution.normalizer import entity_resolver
 from src.utils.logger import logger, setup_logging
-from src.utils.run_state import load_source_freshness
+from src.utils.run_state import load_source_freshness, reset_source_freshness
 
 # WAL checkpointing kicks in for long runs so an interrupted crawl resumes from exports/wal/.
 WAL_AUTO_ENABLE_TARGET = 1000
 
 
-def _warn_config(run_phase1: bool, upload_sheets: bool, target_count: int) -> None:
+def _warn_config(run_phase1: bool, upload_sheets: bool, target_count: int, fresh: bool = False) -> None:
     """Surface configuration gaps up front instead of letting them degrade silently."""
     if run_phase1:
         if not settings.github_token:
@@ -47,7 +47,9 @@ def _warn_config(run_phase1: bool, upload_sheets: bool, target_count: int) -> No
                 "[yellow]⚠️  No LLM API keys set: extraction will be deterministic-only. "
                 "Set at least one of GEMINI_API_KEY / GROQ_API_KEY / CUSTOM_LLM_API_KEY in .env.[/yellow]"
             )
-        if target_count >= WAL_AUTO_ENABLE_TARGET:
+        if fresh:
+            console.print("[yellow]--fresh flag set: WAL checkpoints ignored/truncated, per-source freshness history reset.[/yellow]")
+        elif target_count >= WAL_AUTO_ENABLE_TARGET:
             console.print("[dim]WAL checkpointing enabled: an interrupted run resumes from exports/wal/.[/dim]")
     if upload_sheets and not settings.effective_service_account_path:
         console.print(
@@ -307,7 +309,7 @@ async def _cancel_background_tasks(monitor_task: Optional[asyncio.Task], cache_s
         await cache_save_task
 
 
-async def _run_crawlers(run_phase1: bool, run_phase2: bool, target_count: int) -> Dict[str, list]:
+async def _run_crawlers(run_phase1: bool, run_phase2: bool, target_count: int, reset_wal: bool = False) -> Dict[str, list]:
     """Build and execute the Phase I/II crawler set concurrently.
     Returns per-vertical record lists (empty for skipped phases); propagates
     CancelledError so the caller can persist state and report interruption."""
@@ -317,11 +319,14 @@ async def _run_crawlers(run_phase1: bool, run_phase2: bool, target_count: int) -
         console.print(f"[yellow]Launching Phase I: Bulk Acquisition (Target: {target_count})...[/yellow]")
         phase1_tasks = [
             _crawl("papers", ResearchPapersCrawler, target_count=target_count,
-                   wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
+                   wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET,
+                   reset_wal=reset_wal),
             _crawl("startups", StartupsCrawler, target_count=target_count,
-                   wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
+                   wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET,
+                   reset_wal=reset_wal),
             _crawl("products", ProductsCrawler, target_count=target_count,
-                   wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET),
+                   wal_enabled=target_count >= WAL_AUTO_ENABLE_TARGET,
+                   reset_wal=reset_wal),
         ]
     phase2_tasks = []
     if run_phase2:
@@ -465,11 +470,16 @@ async def run_pipeline(
     output_xlsx: str = "exports/FrontierAtlas_Intelligence.xlsx",
     upload_sheets: bool = False,
     progress_interval: float = 180.0,
+    fresh: bool = False,
 ):
     """Execute async pipeline phases and export structured deliverables."""
     loop = asyncio.get_running_loop()
     setup_signal_handlers(loop)
     console.print("[bold blue]🚀 Launching FrontierAtlas AI Data Intelligence Pipeline...[/bold blue]")
+
+    if fresh:
+        console.print("[yellow]--fresh flag enabled: resetting per-source freshness history and truncating WAL checkpoints.[/yellow]")
+        reset_source_freshness()
 
     run_started = time.monotonic()
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -478,7 +488,7 @@ async def run_pipeline(
     out_dir = os.path.dirname(output_xlsx) or "exports"
 
     try:
-        collected = await _run_crawlers(run_phase1, run_phase2, target_count)
+        collected = await _run_crawlers(run_phase1, run_phase2, target_count, reset_wal=fresh)
     except asyncio.CancelledError:
         _report_interrupted(run_id, run_started, target_count, run_phase1, run_phase2, output_dir=out_dir)
         raise
@@ -519,12 +529,13 @@ PHASE1_OUTPUT_XLSX = "exports/phase1_test.xlsx"
 @click.option("--output", type=str, default=None, help="Output Excel path (default: phase1_test.xlsx for --phase 1, else FrontierAtlas_Intelligence.xlsx)")
 @click.option("--sheets", is_flag=True, default=False, help="Upload deliverables to Google Sheets (requires GOOGLE_SERVICE_ACCOUNT_PATH)")
 @click.option("--progress-interval", type=int, default=180, help="Seconds between live progress updates (0 disables)")
-def main(phase: str, target: int, output: str, sheets: bool, progress_interval: int):
+@click.option("--fresh", is_flag=True, default=False, help="Ignore WAL checkpoints, truncate WAL files, and reset run state freshness")
+def main(phase: str, target: int, output: str, sheets: bool, progress_interval: int, fresh: bool):
     """FrontierAtlas AI Intelligence Pipeline CLI."""
     setup_logging()
     run_phase1 = phase in ("1", "all")
     run_phase2 = phase in ("2", "all")
-    _warn_config(run_phase1, sheets, target)
+    _warn_config(run_phase1, sheets, target, fresh=fresh)
     # Default output aligns with scripts/verify_phase1.py expectations per phase.
     output_xlsx = output or (PHASE1_OUTPUT_XLSX if phase == "1" else DEFAULT_OUTPUT_XLSX)
     try:
@@ -536,6 +547,7 @@ def main(phase: str, target: int, output: str, sheets: bool, progress_interval: 
                 output_xlsx=output_xlsx,
                 upload_sheets=sheets,
                 progress_interval=progress_interval,
+                fresh=fresh,
             )
         )
     except (KeyboardInterrupt, asyncio.CancelledError):

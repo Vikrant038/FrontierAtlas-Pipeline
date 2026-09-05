@@ -241,3 +241,69 @@ async def test_crawler_wal_interrupted_run_full_cycle(tmp_path):
 
     # Assert: a completed run truncates the WAL so the next run starts fresh
     assert wal_file.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.asyncio
+async def test_crawler_wal_reset_wal_truncates_and_starts_fresh(tmp_path):
+    """(a) With reset_wal=True, a pre-populated WAL file is truncated and crawler collects from scratch."""
+    # Arrange
+    wal_file = tmp_path / "fresh_run_wal.jsonl"
+    entries = [
+        {"key": "item-old-0", "data": {"seq": 0}},
+        {"key": "item-old-1", "data": {"seq": 1}},
+        {"key": "item-old-2", "data": {"seq": 2}},
+    ]
+    wal_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+    assert wal_file.stat().st_size > 0
+
+    class CountingCrawler(TargetedCrawler):
+        async def crawl(self):
+            self.recovered_count = self.recover_from_wal()
+            for i in range(5):
+                self.add(f"item-new-{i}", {"seq": i})
+            return self.collected[: self.target_count]
+
+    # Act
+    crawler = CountingCrawler(target_count=5, wal_path=str(wal_file), reset_wal=True)
+    collected = await crawler.crawl()
+
+    # Assert - WAL was truncated on init, recover_from_wal skipped, collected from scratch
+    assert crawler.recovered_count == 0
+    assert len(collected) == 5
+    assert [rec["seq"] for rec in collected] == [0, 1, 2, 3, 4]
+    assert "item-old-0" not in crawler.seen_keys
+    assert "item-new-0" in crawler.seen_keys
+    assert "item-new-4" in crawler.seen_keys
+
+
+@pytest.mark.asyncio
+async def test_crawler_wal_without_reset_wal_resumes_normally(tmp_path):
+    """(b) Without reset_wal (default False), existing resume behavior is unchanged."""
+    # Arrange
+    wal_file = tmp_path / "resume_run_wal.jsonl"
+    entries = [
+        {"key": "item-old-0", "data": {"seq": 100}},
+        {"key": "item-old-1", "data": {"seq": 101}},
+    ]
+    wal_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+
+    class ResumingCrawler(TargetedCrawler):
+        async def crawl(self):
+            self.recovered_count = self.recover_from_wal()
+            for i in range(5):
+                self.add(f"item-new-{i}", {"seq": i})
+                if self.is_full:
+                    break
+            return self.collected[: self.target_count]
+
+    # Act - default reset_wal=False
+    crawler = ResumingCrawler(target_count=5, wal_path=str(wal_file))
+    collected = await crawler.crawl()
+
+    # Assert - 2 items recovered, then 3 new items collected to reach target=5
+    assert crawler.recovered_count == 2
+    assert len(collected) == 5
+    assert [rec["seq"] for rec in collected] == [100, 101, 0, 1, 2]
+    assert "item-old-0" in crawler.seen_keys
+    assert "item-new-0" in crawler.seen_keys
+

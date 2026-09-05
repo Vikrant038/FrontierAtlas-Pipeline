@@ -138,3 +138,28 @@ def save_source_freshness(
         state[key] = existing
 
     _persist(crawler_name, _mutate, state_path)
+
+
+def reset_source_freshness(
+    crawler_name: Optional[str] = None,
+    state_path: Optional[str] = None,
+) -> None:
+    """
+    Reset per-source freshness history in run-state so stale-source warnings
+    start from a clean slate. If crawler_name is specified, resets only that
+    crawler's freshness entries; otherwise removes all *_freshness records.
+    """
+    state_path = state_path or _default_state_path()
+
+    def _mutate(state: dict) -> None:
+        if crawler_name:
+            state.pop(f"{crawler_name}_freshness", None)
+        else:
+            for key in list(state.keys()):
+                if key.endswith("_freshness"):
+                    state.pop(key, None)
+
+    _persist(crawler_name or "reset_freshness", _mutate, state_path)
+
+
+reset_freshness_history = reset_source_freshness

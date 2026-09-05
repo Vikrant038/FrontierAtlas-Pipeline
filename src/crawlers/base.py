@@ -371,6 +371,7 @@ class TargetedCrawler(AsyncBaseCrawler):
         target_count: int = 1000,
         wal_enabled: bool = False,
         wal_path: Optional[str] = None,
+        reset_wal: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -378,18 +379,35 @@ class TargetedCrawler(AsyncBaseCrawler):
         self.github_token = settings.github_token
         self.seen_keys: set = set()
         self.collected: List[Any] = []
+        self.reset_wal: bool = reset_wal
         self.wal_enabled: bool = (
             wal_enabled or getattr(settings, "enable_wal", False) or (wal_path is not None)
         )
         self.wal_path: Optional[str] = wal_path or (
             str(Path(settings.wal_dir) / f"{self.__class__.__name__.lower()}_wal.jsonl")
-            if self.wal_enabled
+            if (self.wal_enabled or self.reset_wal)
             else None
         )
         self._wal_file = None
+        if self.reset_wal and self.wal_path:
+            self.truncate_wal()
         # GitHub token pool: GITHUB_TOKENS for scale, GITHUB_TOKEN as the single-key fallback.
         self.github_tokens: List[str] = settings.github_token_list
         self._exhausted_github_tokens: set = set()
+
+    def truncate_wal(self) -> None:
+        """Truncate the WAL file so crawler starts completely fresh (ignoring prior runs)."""
+        if not self.wal_path:
+            return
+        try:
+            self.close_wal()
+            p = Path(self.wal_path)
+            if p.exists():
+                with open(p, "w", encoding="utf-8") as f:
+                    f.truncate(0)
+                logger.info(f"Truncated existing WAL {self.wal_path} (reset_wal=True).")
+        except OSError as exc:
+            logger.warning(f"Could not truncate WAL {self.wal_path}: {exc}")
 
     def _pick_github_token(self, key: str = "") -> Optional[str]:
         """Choose a non-exhausted GitHub token (stable per key) or None for anonymous mode."""
@@ -501,7 +519,7 @@ class TargetedCrawler(AsyncBaseCrawler):
     def recover_from_wal(self, model_cls: Optional[Any] = None) -> int:
         """Recover collected records and deduplication keys from WAL. Returns count of recovered items.
         Compacts the WAL to the recovered remainder so replay cost stays bounded across repeated interruptions."""
-        if not self.wal_path or not Path(self.wal_path).exists():
+        if self.reset_wal or not self.wal_path or not Path(self.wal_path).exists():
             return 0
         recovered_count = 0
         remainder: List[Dict[str, Any]] = []
