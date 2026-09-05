@@ -5,6 +5,7 @@ SSRF URL sanitization, and curl-cffi TLS impersonation fallback.
 """
 
 import asyncio
+from datetime import datetime
 import json
 from abc import ABC, abstractmethod
 from pathlib import Path

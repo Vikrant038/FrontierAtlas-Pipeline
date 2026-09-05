@@ -4,6 +4,7 @@ Follows AAA pattern per CODING_STANDARDS.md Pillar 7.
 """
 
 import asyncio
+import contextlib
 import signal
 from unittest.mock import MagicMock, patch
 import pytest
@@ -48,10 +49,8 @@ async def test_signal_handlers_registration_and_callback():
 
         # Cleanup
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 @pytest.mark.asyncio
@@ -59,13 +58,15 @@ async def test_run_pipeline_cancellation_saves_cache():
     # Arrange
     mock_save = MagicMock()
 
-    with patch.object(entity_resolver, "save_cache", mock_save):
-        with patch("src.cli._crawl", side_effect=asyncio.CancelledError()):
-            # Act & Assert
-            with pytest.raises(asyncio.CancelledError):
-                await run_pipeline(run_phase1=True, run_phase2=False, target_count=1)
+    with (
+        patch.object(entity_resolver, "save_cache", mock_save),
+        patch("src.cli._crawl", side_effect=asyncio.CancelledError()),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        # Act & Assert
+        await run_pipeline(run_phase1=True, run_phase2=False, target_count=1)
 
-            mock_save.assert_called()
+        mock_save.assert_called()
 
 
 def _crafted_freshness(crafted):
@@ -178,14 +179,16 @@ def test_cli_main_cancelled_error_graceful_exit():
 @pytest.mark.asyncio
 async def test_run_pipeline_cancellation_persists_interrupted_report():
     # Arrange
-    with patch("src.cli._run_crawlers", side_effect=asyncio.CancelledError()):
-        with patch("src.cli.entity_resolver.save_cache") as mock_save:
-            with patch("src.cli._write_run_report") as mock_report:
-                # Act & Assert
-                with pytest.raises(asyncio.CancelledError):
-                    await run_pipeline(run_phase1=True, run_phase2=False, target_count=5)
+    with (
+        patch("src.cli._run_crawlers", side_effect=asyncio.CancelledError()),
+        patch("src.cli.entity_resolver.save_cache") as mock_save,
+        patch("src.cli._write_run_report") as mock_report,
+    ):
+        # Act & Assert
+        with pytest.raises(asyncio.CancelledError):
+            await run_pipeline(run_phase1=True, run_phase2=False, target_count=5)
 
-                mock_save.assert_called_once()
-                mock_report.assert_called_once()
-                assert mock_report.call_args.kwargs["status"] == "interrupted"
+        mock_save.assert_called_once()
+        mock_report.assert_called_once()
+        assert mock_report.call_args.kwargs["status"] == "interrupted"
 

@@ -314,7 +314,7 @@ def test_exports_produce_parseable_files_round_trip(tmp_path):
 
     # Assert 1 - Round-trip read back from Excel with openpyxl
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    for key, (tab_title, _, expected_headers) in ENTITY_SPECS.items():
+    for _, (tab_title, _, expected_headers) in ENTITY_SPECS.items():
         assert tab_title in wb.sheetnames, f"Missing sheet {tab_title}"
         sheet = wb[tab_title]
         actual_headers = [cell.value for cell in sheet[1]]
@@ -334,7 +334,7 @@ def test_exports_produce_parseable_files_round_trip(tmp_path):
     assert abs(float(wb["Entity Mapping Log"].cell(row=2, column=5).value) - 0.98) < 1e-4
 
     # Assert 2 - Round-trip read back from CSV files
-    for key, (tab_title, filename, expected_headers) in ENTITY_SPECS.items():
+    for key, (_, filename, expected_headers) in ENTITY_SPECS.items():
         assert key in exported_csvs
         csv_file = exported_csvs[key]
         assert os.path.exists(csv_file)

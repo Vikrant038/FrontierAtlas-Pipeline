@@ -6,16 +6,13 @@ non-fcntl writes, entity to_row variants, and tiny exporter helpers.
 """
 
 import json
-import os
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
 
 import pytest
 import dateparser as dateparser_lib
 
 from src.config import Settings
 from src.crawlers import anti_bot
-from src.crawlers.news_crawler import NewsCrawler
 from src.exporters.base import to_str
 from src.exporters.csv_exporter import CSVExporter
 from src.exporters.excel_exporter import ExcelExporter

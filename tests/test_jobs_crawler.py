@@ -347,7 +347,6 @@ def test_jobs_crawler_split_company_title_branches(raw_title, author, split_colo
 
 def _future(value):
     """Wrap a plain value in a completed coroutine (feed/fetch seam stub)."""
-    import asyncio
 
     async def _wrap():
         return value
@@ -564,7 +563,6 @@ async def test_jobs_crawler_yc_hn_end_to_end():
 async def test_jobs_crawler_crawl_dispatcher_board_failure(monkeypatch):
     # Arrange - crawl() gathers all five boards concurrently; one board raising must
     # degrade to a zero-fresh stamp instead of aborting the whole crawl.
-    import asyncio
 
     from src.schemas.entities import JobContent, JobRecord, SourceMetadata
 

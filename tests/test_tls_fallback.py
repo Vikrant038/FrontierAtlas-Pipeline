@@ -9,7 +9,7 @@ import httpx
 import pytest
 import respx
 
-from src.crawlers.base import AsyncBaseCrawler
+from src.crawlers.base import AsyncBaseCrawler, TransientNetworkError
 
 
 class DummyCrawler(AsyncBaseCrawler):
@@ -83,7 +83,7 @@ async def test_fetch_does_not_escalate_on_other_status_codes():
     crawler.fetch_tls = fake_fetch_tls  # type: ignore[method-assign]
 
     # Act & Assert - 500 triggers TransientNetworkError retry path, not TLS escalation
-    with pytest.raises(Exception):
+    with pytest.raises(TransientNetworkError):
         await crawler.fetch(test_url)
     await crawler.close()
     assert fallback_called is False

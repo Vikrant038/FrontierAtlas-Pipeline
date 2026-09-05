@@ -67,7 +67,7 @@ async def act1_tls_bypass():
         title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE)
         page_title = title_match.group(1).strip() if title_match else "No Title Tag"
 
-        print(f"  HTTP Status Code : 200 OK (curl-cffi Chrome124 socket impersonation)")
+        print("  HTTP Status Code : 200 OK (curl-cffi Chrome124 socket impersonation)")
         print(f"  Extracted Title  : {page_title}")
         print(f"  Payload Size     : {len(html):,} bytes")
         print(f"  Content Snippet  : {clean_snippet(html)}")

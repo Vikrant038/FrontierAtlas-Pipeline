@@ -192,7 +192,7 @@ async def test_provider_rate_limiter_pacing(monkeypatch):
     # Act
     t1 = await limiter.acquire("test")
     t2 = await limiter.acquire("test")
-    t3 = await limiter.acquire("test")
+    await limiter.acquire("test")
 
     # Assert: first two calls did not sleep, third call triggered pacing sleep
     assert t1 == 0.0

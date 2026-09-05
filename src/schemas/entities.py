@@ -30,9 +30,11 @@ class RoleFamilyEnum(str, Enum):
 
 
 class MatchMethodEnum(str, Enum):
+    # Values mirror PROJECT_CONTEXT.md Section 4 "Match Method Values" plus
+    # MANUAL_OVERRIDE (empty-name sentinel). FUZZY_PARTIAL is specified there but
+    # intentionally unimplemented: no partial-ratio matching tier exists in the resolver.
     NORMALIZATION_EXACT = "NORMALIZATION_EXACT"
     FUZZY_TOKEN_SORT = "FUZZY_TOKEN_SORT"
-    FUZZY_PARTIAL = "FUZZY_PARTIAL"
     ALIAS_MATCH = "ALIAS_MATCH"
     LLM_DISAMBIGUATION = "LLM_DISAMBIGUATION"
     MANUAL_OVERRIDE = "MANUAL_OVERRIDE"

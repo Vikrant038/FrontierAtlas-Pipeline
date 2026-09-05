@@ -29,7 +29,7 @@ from src.config import settings
 async def test_gemini(api_key: Optional[str] = None) -> bool:
     """Test Google Gemini connectivity and JSON output."""
     key = api_key or settings.gemini_api_key
-    print(f"\n--- Testing Tier 1: Google Gemini ---")
+    print("\n--- Testing Tier 1: Google Gemini ---")
     if not key:
         print("❌ GEMINI_API_KEY is not set.")
         return False

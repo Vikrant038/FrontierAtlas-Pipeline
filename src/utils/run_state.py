@@ -14,9 +14,13 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, Optional, Set
 
 
+from src.config import settings
 from src.utils.logger import logger
 
-STATE_PATH = os.path.join("exports", "run_state.json")
+
+def _default_state_path() -> str:
+    """Resolve the run-state path from Settings (env-overridable via RUN_STATE_PATH)."""
+    return settings.run_state_path
 
 # Keep the last N per-source fresh-item counts for staleness detection.
 _FRESHNESS_HISTORY_LEN = 5
@@ -73,8 +77,9 @@ def _persist(crawler_name: str, mutator: Callable[[dict], None], state_path: str
         logger.error(f"Failed to persist run state atomically for {crawler_name}: {state_exc}")
 
 
-def load_seen_keys(crawler_name: str, state_path: str = STATE_PATH) -> Set[str]:
+def load_seen_keys(crawler_name: str, state_path: Optional[str] = None) -> Set[str]:
     """Load the seen-key set recorded by the previous run for this crawler."""
+    state_path = state_path or _default_state_path()
     state = _read_state(state_path)
     if state is None:
         logger.warning(f"Run state unreadable; novelty heuristic disabled for {crawler_name}.")
@@ -82,20 +87,22 @@ def load_seen_keys(crawler_name: str, state_path: str = STATE_PATH) -> Set[str]:
     return set(state.get(crawler_name, []))
 
 
-def save_seen_keys(crawler_name: str, seen_keys: Set[str], state_path: str = STATE_PATH) -> None:
+def save_seen_keys(crawler_name: str, seen_keys: Set[str], state_path: Optional[str] = None) -> None:
     """
     Persist this run's collected keys for the next run's novelty comparison.
     Atomic and lock-protected; preserves any other crawlers' state in the same file.
     """
+    state_path = state_path or _default_state_path()
 
     def _mutate(state: dict) -> None:
-        state[crawler_name] = sorted(list(seen_keys))
+        state[crawler_name] = sorted(seen_keys)
 
     _persist(crawler_name, _mutate, state_path)
 
 
-def load_source_freshness(crawler_name: str, state_path: str = STATE_PATH) -> Dict[str, Dict]:
+def load_source_freshness(crawler_name: str, state_path: Optional[str] = None) -> Dict[str, Dict]:
     """Load per-source freshness stamps ({source: {"last_run_utc", "recent_fresh_counts"}})."""
+    state_path = state_path or _default_state_path()
     state = _read_state(state_path)
     if state is None:
         return {}
@@ -106,13 +113,14 @@ def load_source_freshness(crawler_name: str, state_path: str = STATE_PATH) -> Di
 def save_source_freshness(
     crawler_name: str,
     source_counts: Dict[str, int],
-    state_path: str = STATE_PATH,
+    state_path: Optional[str] = None,
 ) -> None:
     """
     Record this run's fresh-item count per source, appending to each source's
     recent history (capped at _FRESHNESS_HISTORY_LEN) so consecutive zero-fresh
     runs can be detected. Atomic and lock-protected like save_seen_keys.
     """
+    state_path = state_path or _default_state_path()
 
     def _mutate(state: dict) -> None:
         key = f"{crawler_name}_freshness"

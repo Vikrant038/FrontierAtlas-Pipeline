@@ -3,7 +3,6 @@ Unit tests for RFC 7231 HTTP-date parsing in Retry-After handler (BUG-07).
 Follows AAA pattern per CODING_STANDARDS.md Pillar 7.
 """
 
-import asyncio
 from unittest.mock import AsyncMock, patch
 import pytest
 from freezegun import freeze_time

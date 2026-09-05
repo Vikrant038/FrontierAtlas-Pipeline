@@ -37,9 +37,7 @@ class JobsCrawler(AsyncBaseCrawler):
         tag_str = " ".join(tags or []).lower()
         if any(w in loc_str or w in tag_str or w in title_str for w in REMOTE_SIGNALS):
             return True
-        if not loc_str and not any(w in title_str for w in ONSITE_SIGNALS):
-            return True
-        return False
+        return not loc_str and not any(w in title_str for w in ONSITE_SIGNALS)
 
     async def _build_record(
         self,

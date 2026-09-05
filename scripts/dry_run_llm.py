@@ -64,7 +64,7 @@ async def main():
     print(f"Tier 1 (Gemini):   {settings.gemini_model} (configured: {bool(settings.gemini_api_key)})")
     print(f"Tier 2 (Groq):     {settings.groq_model} (configured: {bool(settings.groq_api_key)})")
     print(f"Tier 3 (Custom):   {settings.effective_tier3_model} (configured: {bool(settings.effective_tier3_api_key)})")
-    print(f"Tier 4 (Rules):    Deterministic Zero-API Heuristics")
+    print("Tier 4 (Rules):    Deterministic Zero-API Heuristics")
     print(f"Concurrency Limit: {settings.max_concurrent_llm_requests} parallel workers")
     print("-" * 80)
 

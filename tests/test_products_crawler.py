@@ -8,7 +8,6 @@ import asyncio
 import pytest
 import respx
 import httpx
-from unittest.mock import AsyncMock
 
 from src.crawlers.products_crawler import ProductsCrawler
 from src.schemas.entities import PricingModelEnum
@@ -129,7 +128,6 @@ from types import SimpleNamespace as _NS
 
 from src.config import settings as products_settings
 from src.llm.fallback_chain import llm_engine as products_llm
-from src.schemas.entities import PricingModelEnum
 
 
 def test_products_configured_sources_override(monkeypatch):

@@ -13,7 +13,6 @@ Usage:
 """
 
 import asyncio
-import csv
 import sys
 from collections import Counter
 from pathlib import Path
@@ -22,7 +21,7 @@ from typing import Dict, List, Tuple
 # Ensure repository root is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _liveness import audit_urls
+from _liveness import audit_urls, load_csv as load_csv_rows
 
 from src.crawlers.jobs_crawler import AI_KEYWORD_PATTERN
 from src.exporters.base import ENTITY_SPECS
@@ -33,20 +32,6 @@ DEFAULT_NEWS_PATH = Path("exports/news.csv")
 
 JOBS_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_JOBS_PATH
 NEWS_PATH = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_NEWS_PATH
-
-def load_csv_rows(filepath: Path) -> Tuple[List[str], List[Dict[str, str]]]:
-    """Load headers and rows from a CSV file."""
-    if not filepath.exists():
-        print(f"❌ Error: {filepath} not found.")
-        return [], []
-    with open(filepath, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        try:
-            headers = next(reader)
-        except StopIteration:
-            return [], []
-        dict_reader = csv.DictReader(f, fieldnames=headers)
-        return headers, list(dict_reader)
 
 
 def audit_freshness(rows: List[Dict[str, str]], date_header: str) -> Tuple[int, List[Tuple[int, str, str]]]:

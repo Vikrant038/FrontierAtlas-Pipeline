@@ -4,10 +4,8 @@ through crawler-level tests: GitHub quota classification, fetch_tls status paths
 close()/WAL edge cases, escalation failure branches, and add/recover semantics.
 """
 
-import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 

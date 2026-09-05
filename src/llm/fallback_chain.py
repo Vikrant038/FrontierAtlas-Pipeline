@@ -78,6 +78,22 @@ _LLM_RETRY = retry(
 )
 
 
+def _import_genai_sdk() -> Any:
+    """Import the google-genai SDK, silencing its Python 3.14+ import-time deprecations.
+
+    google-genai <=2.22.0 builds a type alias from typing._UnionGenericAlias, which
+    CPython deprecates (removal in 3.17); no upstream fix exists yet. Scoped to the
+    SDK import only, so unrelated deprecation warnings still surface.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        from google import genai
+        from google.genai import types
+    return genai, types
+
+
 def _clean_json_markdown(text: str) -> str:
     """Strip markdown code block wrappers (```json ... ```) from LLM output."""
     t = (text or "").strip()
@@ -164,10 +180,10 @@ class MultiTierLLMEngine:
         try:
             client_key = f"gemini:{api_key}"
             if client_key not in self._clients:
-                from google import genai
+                genai, _ = _import_genai_sdk()
                 self._clients[client_key] = genai.Client(api_key=api_key)
             client = self._clients[client_key]
-            from google.genai import types
+            _, types = _import_genai_sdk()
 
             # Fresh chat per call: schema differs per request; stateless extraction.
             chat = client.aio.chats.create(
@@ -326,11 +342,6 @@ class MultiTierLLMEngine:
     def get_tier_usage(self) -> Dict[str, int]:
         """Return a copy of the current tier usage counts."""
         return dict(self.tier_usage)
-
-    def reset_tier_usage(self) -> None:
-        """Reset all tier usage counts to zero."""
-        for k in self.tier_usage:
-            self.tier_usage[k] = 0
 
     def save_tier_telemetry(self, filepath: str = "exports/llm_tier_telemetry.json") -> str:
         """Persist tier usage metrics to JSON for audit and evaluation."""

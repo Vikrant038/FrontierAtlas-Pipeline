@@ -91,7 +91,7 @@ async def run_scenario_2_forced_failover() -> bool:
         print("⚠️  GROQ_API_KEY is not set in .env. Tier 2 is UNTESTABLE.")
         return False
 
-    print(f"Action: Simulating Gemini unavailability by unsetting Gemini credentials...")
+    print("Action: Simulating Gemini unavailability by unsetting Gemini credentials...")
     print(f"Target Failover Provider: Groq ({settings.groq_model})")
     
     # Save original key
@@ -160,7 +160,7 @@ async def run_scenario_4_rate_limiter_pacing() -> bool:
     print("\n" + "=" * 80)
     print("SCENARIO 4: Rate Limiter Pacing (20 Rapid Requests -> 15 RPM Window)")
     print("-" * 80)
-    print(f"Testing ProviderRateLimiter with 15 RPM ceiling...")
+    print("Testing ProviderRateLimiter with 15 RPM ceiling...")
     # Use a 2.0-second window scaled for 15 RPM to demonstrate active pacing without 60s idle
     test_limiter = ProviderRateLimiter(rpm_limits={"gemini": 15}, window_seconds=2.0)
 
@@ -176,7 +176,7 @@ async def run_scenario_4_rate_limiter_pacing() -> bool:
 
     total_time = time.monotonic() - t0
     print(f"✅ Rate limiter pacing verified across 20 calls in {total_time:.2f}s:")
-    print(f"   • First 15 requests granted instantly (full window capacity)")
+    print("   • First 15 requests granted instantly (full window capacity)")
     print(f"   • Requests paced after saturation: {slept_count}/20 (sliding window rolls grants out one-by-one,"
           f" so later requests re-acquire instantly as capacity frees)")
     assert slept_count > 0, "Rate limiter did not pace after 15 requests!"
@@ -216,7 +216,7 @@ async def main():
     print(f"Tier 1 (Gemini):   {settings.gemini_model} (configured: {bool(settings.gemini_api_key)})")
     print(f"Tier 2 (Groq):     {settings.groq_model} (configured: {bool(settings.groq_api_key)})")
     print(f"Tier 3 (Custom):   {settings.effective_tier3_model} (configured: {bool(settings.effective_tier3_api_key)})")
-    print(f"Tier 4 (Rules):    Deterministic Zero-API Heuristics")
+    print("Tier 4 (Rules):    Deterministic Zero-API Heuristics")
     print(f"Rate Limits:       Gemini {settings.gemini_rpm} RPM, Groq {settings.groq_rpm} RPM, Custom {settings.custom_llm_rpm} RPM")
     print("-" * 80)
 

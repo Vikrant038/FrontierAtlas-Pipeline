@@ -6,12 +6,11 @@ deterministic-extraction tails. Marked no_auto_mock_llm where extract_structured
 itself is the unit under test.
 """
 
-import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from src.llm import fallback_chain as fc
 from src.llm.fallback_chain import (

@@ -1,12 +1,15 @@
 """
-Shared URL-liveness audit utility for the verification scripts.
-Spot-checks that collected source URLs are still reachable, escalating
-through HEAD and curl-cffi TLS impersonation on 403/405 anti-bot gates.
-Used by verify_all.py and verify_phase2.py.
+Shared verification helpers for the verification scripts.
+- load_csv: read a deliverable CSV into (headers, rows)
+- URL-liveness audit: spot-checks that collected source URLs are still reachable,
+  escalating through HEAD and curl-cffi TLS impersonation on 403/405 anti-bot gates.
+Used by verify_all.py, verify_phase1.py, and verify_phase2.py.
 """
 
 import asyncio
-from typing import List, Tuple
+import csv
+from pathlib import Path
+from typing import Dict, List, Tuple
 
 import httpx
 from curl_cffi.requests import Session as CurlSession
@@ -19,6 +22,20 @@ BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+
+def load_csv(filepath: Path) -> Tuple[List[str], List[Dict[str, str]]]:
+    """Read headers and rows from a CSV file; (empty, empty) when missing or headerless."""
+    if not filepath.exists():
+        return [], []
+    with open(filepath, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        try:
+            headers = next(reader)
+        except StopIteration:
+            return [], []
+        dict_reader = csv.DictReader(f, fieldnames=headers)
+        return headers, list(dict_reader)
 
 
 async def probe_url(client: httpx.AsyncClient, sem: asyncio.Semaphore, url: str) -> Tuple[str, int, str]:

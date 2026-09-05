@@ -64,11 +64,8 @@ def _is_transient_sheets_error(exc: BaseException) -> bool:
         status = getattr(resp, "status_code", None)
         if status in (429, 500, 502, 503, 504):
             return True
-        if any(term in msg for term in ["429", "rate limit", "quota exceeded", "500", "502", "503", "unavailable"]):
-            return True
-    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
-        return True
-    return False
+        return any(term in msg for term in ["429", "rate limit", "quota exceeded", "500", "502", "503", "unavailable"])
+    return isinstance(exc, (ConnectionError, TimeoutError, OSError))
 
 
 _SHEETS_RETRY = retry(

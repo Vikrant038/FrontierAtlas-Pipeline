@@ -103,7 +103,7 @@ class EntityResolver:
             tmp_path = f"{self.cache_path}.tmp"
             with open(tmp_path, "w", encoding="utf-8") as cache_file:
                 json.dump({
-                    "entities": sorted(list(self.canonical_entities)),
+                    "entities": sorted(self.canonical_entities),
                     "domains": self.domain_map
                 }, cache_file, indent=2)
             os.replace(tmp_path, self.cache_path)

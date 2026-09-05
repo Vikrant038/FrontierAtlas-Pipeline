@@ -85,6 +85,7 @@ def _write_run_report(
     resolution_log_rows: int,
     phase1: bool,
     phase2: bool,
+    output_dir: str = "exports",
 ) -> str:
     """Persist a machine-readable run report (CI/cron alerting primitive)."""
     report = {
@@ -99,8 +100,8 @@ def _write_run_report(
         "llm_tier_usage": llm_engine.get_tier_usage(),
         "anti_bot": anti_bot_snapshot(),
     }
-    os.makedirs("exports", exist_ok=True)
-    path = "exports/run_report.json"
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "run_report.json")
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
@@ -346,8 +347,9 @@ async def _run_exports(
 ) -> Dict[str, Any]:
     """Execute the three independent deliverable exports concurrently; returns graph metrics."""
     console.print("[yellow]Executing Phase VI: Exporting 6-Tab Excel, CSVs & Graph Construction...[/yellow]")
+    out_dir = os.path.dirname(output_xlsx) or "exports"
     exporter = ExcelExporter()
-    csv_exporter = CSVExporter()
+    csv_exporter = CSVExporter(output_dir=out_dir)
     graph_builder = KnowledgeGraphBuilder()
     await asyncio.gather(
         asyncio.to_thread(exporter.export, filepath=output_xlsx, startups=startups, products=products,
@@ -360,7 +362,9 @@ async def _run_exports(
     return graph_builder.get_summary_metrics()
 
 
-def _report_interrupted(run_id: str, run_started: float, target_count: int, run_phase1: bool, run_phase2: bool) -> None:
+def _report_interrupted(
+    run_id: str, run_started: float, target_count: int, run_phase1: bool, run_phase2: bool, output_dir: str = "exports",
+) -> None:
     """Persist an interrupted-run report from the CancelledError handler."""
     console.print("[yellow]Pipeline execution interrupted. Saving entity cache and exiting...[/yellow]")
     entity_resolver.save_cache()
@@ -373,13 +377,14 @@ def _report_interrupted(run_id: str, run_started: float, target_count: int, run_
         resolution_log_rows=len(entity_resolver.audit_log),
         phase1=run_phase1,
         phase2=run_phase2,
+        output_dir=output_dir,
     )
 
 
 async def _finalize_run(
     run_id: str, run_started: float, run_phase1: bool, run_phase2: bool, target_count: int,
     upload_sheets: bool, startups: List[Any], products: List[Any], papers: List[Any],
-    news: List[Any], jobs: List[Any], logs: List[Any],
+    news: List[Any], jobs: List[Any], logs: List[Any], output_dir: str = "exports",
 ) -> bool:
     """Optional Sheets upload, stale-source warnings, shortfall gating, and the run report."""
     if upload_sheets:
@@ -411,6 +416,7 @@ async def _finalize_run(
         resolution_log_rows=len(logs),
         phase1=run_phase1,
         phase2=run_phase2,
+        output_dir=output_dir,
     )
     return not shortfall
 
@@ -469,10 +475,12 @@ async def run_pipeline(
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     monitor_task, cache_save_task = _start_background_tasks(progress_interval, run_phase1, run_phase2)
 
+    out_dir = os.path.dirname(output_xlsx) or "exports"
+
     try:
         collected = await _run_crawlers(run_phase1, run_phase2, target_count)
     except asyncio.CancelledError:
-        _report_interrupted(run_id, run_started, target_count, run_phase1, run_phase2)
+        _report_interrupted(run_id, run_started, target_count, run_phase1, run_phase2, output_dir=out_dir)
         raise
     finally:
         await _cancel_background_tasks(monitor_task, cache_save_task)
@@ -497,6 +505,7 @@ async def run_pipeline(
     return await _finalize_run(
         run_id, run_started, run_phase1, run_phase2, target_count,
         upload_sheets, startups, products, papers, news, jobs, logs,
+        output_dir=out_dir,
     )
 
 

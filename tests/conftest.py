@@ -26,3 +26,13 @@ def mock_llm_offline(monkeypatch, request):
         return schema_cls.model_validate(data)
 
     monkeypatch.setattr(llm_engine, "extract_structured", _offline_extract)
+
+
+@pytest.fixture(autouse=True)
+def isolate_run_state(tmp_path, monkeypatch):
+    """Redirect cross-run novelty state to a per-test temp file.
+
+    Prevents test fixtures (e.g. 'Feed 2', 'Stale Feed') from polluting the
+    production exports/run_state.json and surfacing phantom stale-source warnings.
+    """
+    monkeypatch.setattr("src.config.settings.run_state_path", str(tmp_path / "run_state.json"))

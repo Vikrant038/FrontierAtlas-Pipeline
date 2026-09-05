@@ -5,14 +5,11 @@ Verifies offline-safe 429 Retry-After parsing, 413 payload error classification,
 Follows AAA pattern per CODING_STANDARDS.md Pillar 7.
 """
 
-import asyncio
 import json
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import List
 import httpx
 import pytest
 from openai import AsyncOpenAI
-from pydantic import BaseModel
 
 from src.config import settings
 from src.llm import fallback_chain as fc
@@ -159,10 +156,21 @@ async def test_openai_compat_http_mock_transport_200_chat_completion():
     assert parsed["role_family"] == RoleFamilyEnum.RESEARCH.value
 
 
+def _genai_errors_module():
+    """Import google.genai.errors, silencing its py3.14 typing deprecation (see
+    fallback_chain._import_genai_sdk); keeps -W error::DeprecationWarning runs green."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        from google.genai import errors
+    return errors
+
+
 @pytest.mark.asyncio
 async def test_gemini_real_client_error_429_mapping_and_sleep(monkeypatch):
     # Arrange
-    from google.genai import errors
+    errors = _genai_errors_module()
     from types import SimpleNamespace
 
     sleeps: List[float] = []
@@ -220,7 +228,7 @@ async def test_multi_tier_failover_across_real_http_transports(monkeypatch):
     monkeypatch.setattr(settings, "custom_llm_model", "deepseek-chat")
 
     # Tier 1 (Gemini) fails with real 429
-    from google.genai import errors
+    errors = _genai_errors_module()
     from types import SimpleNamespace
     req = httpx.Request("POST", "https://generativelanguage.googleapis.com")
     resp_gemini = httpx.Response(

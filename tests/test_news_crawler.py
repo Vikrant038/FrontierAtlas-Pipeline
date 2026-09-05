@@ -426,7 +426,7 @@ async def test_news_finalize_entry_rolls_back_stale_and_builds_fresh():
 from types import SimpleNamespace as _NS
 
 from src.config import settings
-from src.crawlers.news_crawler import NEWS_SOURCES, NewsCrawler
+from src.crawlers.news_crawler import NEWS_SOURCES
 from src.llm.fallback_chain import llm_engine as news_llm_engine
 from src.llm.prompts import NewsSummarySchema
 from src.schemas.entities import NewsContent, NewsRecord, SourceMetadata

@@ -129,7 +129,6 @@ async def test_startups_crawler_yc_page_error_resilience():
 # exhaustion paths, HF fetch failure, and the crawl() orchestration.
 # ---------------------------------------------------------------------------
 
-from types import SimpleNamespace as _NS
 
 from src.config import settings as startups_settings
 

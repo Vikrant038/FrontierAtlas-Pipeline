@@ -10,8 +10,6 @@ import json
 from types import SimpleNamespace
 
 import csv
-import json
-from datetime import datetime, timezone
 
 import pytest
 import openpyxl
@@ -19,7 +17,6 @@ import respx
 import httpx
 from click.testing import CliRunner
 from freezegun import freeze_time
-from pathlib import Path
 
 from src import cli
 from src.schemas.entities import (
@@ -153,7 +150,7 @@ async def test_run_pipeline_end_to_end_full_target(tmp_path, monkeypatch):
         "Startups", "Products", "Research_Papers", "Jobs_24h", "News_24h", "Entity Mapping Log",
     }
     assert wb["Startups"].max_row == 2  # header + one record
-    report = json.loads(open("exports/run_report.json").read())
+    report = json.loads(open(tmp_path / "run_report.json").read())
     assert report["status"] == "completed"
     assert report["collected"] == {"startups": 1, "products": 1, "papers": 1, "news": 1, "jobs": 1}
     assert report["target_count"] == 1
@@ -174,7 +171,7 @@ async def test_run_pipeline_shortfall_reports_and_exit(tmp_path, monkeypatch):
 
     # Assert
     assert success is False
-    report = json.loads(open("exports/run_report.json").read())
+    report = json.loads(open(tmp_path / "run_report.json").read())
     assert report["status"] == "shortfall"
     assert report["phase2"] is False
 
@@ -455,11 +452,11 @@ async def test_run_pipeline_end_to_end_real_crawlers_completed(tmp_path, monkeyp
     assert wb["News_24h"].max_row == 1
 
     for filename in ("startups.csv", "products.csv", "research_papers.csv"):
-        with open(f"exports/{filename}", newline="", encoding="utf-8") as f:
+        with open(tmp_path / filename, newline="", encoding="utf-8") as f:
             rows = list(csv.reader(f))
         assert len(rows) == 3, filename  # header + 2 data rows
 
-    report = json.loads(open("exports/run_report.json").read())
+    report = json.loads(open(tmp_path / "run_report.json").read())
     assert report["status"] == "completed"
     assert report["phase2"] is False
     assert report["collected"] == {"startups": 2, "products": 2, "papers": 2, "news": 0, "jobs": 0}
@@ -483,7 +480,7 @@ async def test_run_pipeline_end_to_end_real_crawlers_shortfall(tmp_path, monkeyp
 
     # Assert - shortfall flips the result and the report status
     assert success is False
-    report = json.loads(open("exports/run_report.json").read())
+    report = json.loads(open(tmp_path / "run_report.json").read())
     assert report["status"] == "shortfall"
     assert report["collected"]["startups"] == 2
     assert report["collected"]["papers"] == 2
@@ -569,12 +566,12 @@ async def test_run_pipeline_end_to_end_all_phases_composed(tmp_path, monkeypatch
 
     # 2. Verify all CSV files are created and populated
     for filename in ("startups.csv", "products.csv", "research_papers.csv", "jobs.csv", "news.csv"):
-        with open(f"exports/{filename}", newline="", encoding="utf-8") as f:
+        with open(tmp_path / filename, newline="", encoding="utf-8") as f:
             rows = list(csv.reader(f))
         assert len(rows) >= 2, f"CSV {filename} missing data rows"
 
     # 3. Verify run report reflects complete composed state
-    report = json.loads(open("exports/run_report.json").read())
+    report = json.loads(open(tmp_path / "run_report.json").read())
     assert report["status"] == "completed"
     assert report["phase2"] is True
     assert report["collected"]["startups"] >= 2

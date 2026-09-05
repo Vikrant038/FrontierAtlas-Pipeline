@@ -3,6 +3,8 @@ Unit tests for cross-run novelty state persistence.
 Follows AAA pattern with tmp_path isolation per CODING_STANDARDS.md Pillar 7.7.
 """
 
+import os
+
 from src.utils.run_state import (
     load_seen_keys,
     load_source_freshness,
@@ -120,3 +122,25 @@ def test_load_source_freshness_missing_or_corrupt_returns_empty(tmp_path):
     # Assert
     assert load_source_freshness("news", str(tmp_path / "missing.json")) == {}
     assert load_source_freshness("news", str(corrupt)) == {}
+
+
+def test_crawler_freshness_writes_injected_path_not_production(tmp_path, monkeypatch):
+    # Arrange - regression guard: NewsCrawler/JobsCrawler freshness persistence must
+    # land on the Settings-injected path, never the production exports/run_state.json.
+    monkeypatch.setattr("src.config.settings.run_state_path", str(tmp_path / "injected.json"))
+    prod_path = "exports/run_state.json"
+    prod_before = open(prod_path).read() if os.path.exists(prod_path) else None
+
+    from src.crawlers.news_crawler import NewsCrawler
+    NewsCrawler(sources=[{"name": "IsolationFeed", "feed_url": "https://feeds.example.com/iso.xml"}])
+
+    # Act - save freshness the way crawl() does
+    from src.utils.run_state import save_source_freshness, load_source_freshness
+    save_source_freshness("news", {"IsolationFeed": 3})
+
+    # Assert - state went to injected path only
+    assert os.path.exists(str(tmp_path / "injected.json"))
+    assert load_source_freshness("news")["IsolationFeed"]["recent_fresh_counts"] == [3]
+    # Production file untouched byte-for-byte
+    prod_after = open(prod_path).read() if os.path.exists(prod_path) else None
+    assert prod_after == prod_before

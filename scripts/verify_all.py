@@ -12,16 +12,14 @@ Validates:
 """
 
 import asyncio
-import csv
 import json
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _liveness import audit_urls
+from _liveness import audit_urls, load_csv
 
 from src.crawlers.jobs_crawler import AI_KEYWORD_PATTERN as AI_TITLE_PATTERN
 from src.utils.date_normalizer import parse_datetime_to_utc
@@ -35,18 +33,6 @@ NEWS_CSV = EXPORTS_DIR / "news.csv"
 LOGS_CSV = EXPORTS_DIR / "entity_mapping_log.csv"
 NEWS_TELEMETRY_PATH = EXPORTS_DIR / "news_summary_telemetry.json"
 LLM_TELEMETRY_PATH = EXPORTS_DIR / "llm_tier_telemetry.json"
-
-def load_csv(filepath: Path) -> Tuple[List[str], List[Dict[str, str]]]:
-    if not filepath.exists():
-        return [], []
-    with open(filepath, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        try:
-            headers = next(reader)
-        except StopIteration:
-            return [], []
-        dict_reader = csv.DictReader(f, fieldnames=headers)
-        return headers, list(dict_reader)
 
 
 def main() -> None:
@@ -166,7 +152,7 @@ def main() -> None:
     print("\n--- Gate F: Product Pricing Distribution Shift vs Pre-LLM Baseline ---")
     pricing_counts = Counter(r.get("content.pricingModel", "UNKNOWN") for r in products)
     total_products = len(products) or 1
-    print(f"  Pre-LLM Baseline FREEMIUM       : 76.5%")
+    print("  Pre-LLM Baseline FREEMIUM       : 76.5%")
     print("  New Active Pricing Distribution :")
     for model in ["FREE", "FREEMIUM", "PAID", "ENTERPRISE"]:
         cnt = pricing_counts.get(model, 0)
