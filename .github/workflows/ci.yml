@@ -22,10 +22,11 @@ jobs:
         with:
           fetch-depth: 0  # full history so gitleaks can scan all commits
 
-      - name: Lint (ruff: errors, unused code, bugbear, simplify)
+      - name: "Lint (ruff: errors, unused code, bugbear, simplify)"
         uses: astral-sh/ruff-action@v3
         with:
-          args: check src/ scripts/ tests/ --select F,E9,B,C4,SIM
+          args: "check --select F,E9,B,C4,SIM"
+          src: "src/ scripts/ tests/"
 
       - name: Secrets Scan (gitleaks)
         uses: gitleaks/gitleaks-action@v2

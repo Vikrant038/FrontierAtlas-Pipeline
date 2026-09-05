@@ -1,4 +1,9 @@
 [tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["F", "E9", "B", "C4", "SIM"]
+
 # SIM115 in tests: fixture-style open() for read-assertions on tmp files —
 # explicit close ordering is the point of some tests; per-file ignore keeps the gate clean.
 [tool.ruff.lint.per-file-ignores]
