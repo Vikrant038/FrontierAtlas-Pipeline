@@ -14,6 +14,7 @@ import respx
 
 from src.crawlers.base import AsyncBaseCrawler
 from src.crawlers.papers_crawler import ResearchPapersCrawler
+from src.schemas.entities import ResearchPaperContent, ResearchPaperRecord
 
 RSS_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -537,3 +538,53 @@ async def test_crawl_loop_breaks_on_empty_batch():
     records = await crawler.crawl()
     await crawler.close()
     assert records == []
+
+
+@pytest.mark.asyncio
+async def test_papers_enrichment_counters_and_state():
+    crawler = ResearchPapersCrawler(target_count=2)
+    assert crawler.enriched_count == 0
+    assert crawler.enrich_total == 0
+    assert not crawler.is_enriching
+
+    rec1 = ResearchPaperRecord(
+        content=ResearchPaperContent(
+            title="Paper One", authors=["A"], paper_url="https://arxiv.org/abs/1", published_date="2026-09-03"
+        )
+    )
+    rec2 = ResearchPaperRecord(
+        content=ResearchPaperContent(
+            title="Paper Two", authors=["B"], paper_url="https://arxiv.org/abs/2", published_date="2026-09-03"
+        )
+    )
+    batch = [(rec1, "org/repo1"), (rec2, "org/repo2")]
+
+    crawler._fetch_stars = AsyncMock(return_value=("https://github.com/org/repo", 99))
+    tasks = await crawler._spawn_enrichment(batch, [])
+    assert crawler.enrich_total == 2
+    assert crawler.is_enriching
+
+    await asyncio.gather(*tasks)
+    assert crawler.enriched_count == 2
+    assert not crawler.is_enriching
+    await crawler.close()
+
+
+@pytest.mark.asyncio
+async def test_papers_enrichment_counters_advance_on_quota_block():
+    crawler = ResearchPapersCrawler(target_count=2)
+    crawler._disable_github_enrichment()
+    assert crawler._github_quota_blocked()
+
+    rec = ResearchPaperRecord(
+        content=ResearchPaperContent(
+            title="Paper One", authors=["A"], paper_url="https://arxiv.org/abs/1", published_date="2026-09-03"
+        )
+    )
+    batch = [(rec, "org/repo1"), (rec, "org/repo2")]
+    tasks = await crawler._spawn_enrichment(batch, [])
+    assert len(tasks) == 0
+    assert crawler.enrich_total == 2
+    assert crawler.enriched_count == 2
+    assert not crawler.is_enriching
+    await crawler.close()

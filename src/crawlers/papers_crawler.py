@@ -57,6 +57,17 @@ class ResearchPapersCrawler(TargetedCrawler):
         # (prevents thousands of doomed requests in anonymous mode: 60 req/hr cap).
         self._github_quota_blocked_until: float = 0.0
         self._anonymous_lookups: int = 0
+        self.enriched_count: int = 0  # live progress reporting of completed star lookups
+        self.enrich_total: int = 0    # total paper repos queued for star enrichment
+
+    @property
+    def is_enriching(self) -> bool:
+        """True while background star lookups are actively in-flight."""
+        return (
+            self.enrich_total > 0
+            and self.enriched_count < self.enrich_total
+            and not self._github_quota_blocked()
+        )
 
     def _github_quota_blocked(self) -> bool:
         """True while the one-hour GitHub quota backoff window is active."""
@@ -344,8 +355,9 @@ class ResearchPapersCrawler(TargetedCrawler):
 
     async def _enrich_batch(self, batch: List[Tuple[ResearchPaperRecord, str]]) -> None:
         """Enrich a batch of paper records with GitHub stars in background."""
-        for rec, repo_path in batch:
+        for idx, (rec, repo_path) in enumerate(batch):
             if self._github_quota_blocked():
+                self.enriched_count += len(batch) - idx
                 break
             try:
                 repo_url, stars = await self._fetch_stars(repo_path)
@@ -353,6 +365,8 @@ class ResearchPapersCrawler(TargetedCrawler):
                 rec.content.github_stars = stars
             except Exception as exc:
                 logger.debug(f"Background star enrichment error for {repo_path}: {exc}")
+            finally:
+                self.enriched_count += 1
 
     async def _spawn_enrichment(
         self,
@@ -362,7 +376,11 @@ class ResearchPapersCrawler(TargetedCrawler):
         """Start a background enrichment task for a batch and prune finished tasks
         once 20 are in flight (keeps the pool bounded without blocking ingestion).
         Returns the surviving task list."""
-        if not batch_to_enrich or self._github_quota_blocked():
+        if not batch_to_enrich:
+            return enrich_tasks
+        self.enrich_total += len(batch_to_enrich)
+        if self._github_quota_blocked():
+            self.enriched_count += len(batch_to_enrich)
             return enrich_tasks
         enrich_tasks.append(asyncio.create_task(self._enrich_batch(batch_to_enrich)))
         if len(enrich_tasks) < 20:

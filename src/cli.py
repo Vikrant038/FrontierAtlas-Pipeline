@@ -150,6 +150,28 @@ def _crawler_progress(name: str) -> Tuple[int, Optional[int]]:
     return len(collected), getattr(crawler, "target_count", None)
 
 
+def _papers_enrichment_details(crawler: Any) -> Optional[Tuple[str, str, str]]:
+    """Compute (enrichment_label, remaining_repos, eta_str) for in-flight star lookups."""
+    if crawler is None or not getattr(crawler, "is_enriching", False):
+        return None
+    total = getattr(crawler, "enrich_total", 0)
+    done = getattr(crawler, "enriched_count", 0)
+    if total <= 0:
+        return None
+    remaining = max(0, total - done)
+    pct = int(round(100.0 * done / total)) if total > 0 else 0
+    available_tokens = [
+        t for t in getattr(crawler, "github_tokens", [])
+        if t not in getattr(crawler, "_exhausted_github_tokens", set())
+    ]
+    tokens = max(1, len(available_tokens))
+    interval = float(getattr(settings, "github_interval_seconds", 2.1))
+    eta_min = max(1, round((remaining * interval) / (tokens * 60.0))) if remaining > 0 else 0
+    eta_str = f"ETA ~{eta_min} min" if eta_min > 0 else "~0 min"
+    label = f"enriching stars {done}/{total} ({pct}%)"
+    return label, str(remaining), eta_str
+
+
 async def _progress_monitor(interval: float, run_phase1: bool, run_phase2: bool) -> None:
     """Periodically print per-vertical collected/target/remaining/ETA while the pipeline runs."""
     names = []
@@ -172,6 +194,8 @@ async def _progress_monitor(interval: float, run_phase1: bool, run_phase2: bool)
         table.add_column("ETA", style="green")
         for n in names:
             collected, target = _crawler_progress(n)
+            crawler = _ACTIVE_CRAWLERS.get(n)
+            enrichment_info = _papers_enrichment_details(crawler) if n == "papers" else None
             if target:
                 remaining = max(0, target - collected)
                 pct = f" ({100.0 * collected / target:.0f}%)"
@@ -179,7 +203,28 @@ async def _progress_monitor(interval: float, run_phase1: bool, run_phase2: bool)
                 if collected > 0 and elapsed_min > 0:
                     rate = collected / elapsed_min
                     eta = f"~{remaining / rate:.0f} min" if rate > 0 else ""
-                table.add_row(n, f"{collected}{pct}", str(target), str(remaining), eta)
+
+                if enrichment_info:
+                    enrich_label, enrich_rem, enrich_eta = enrichment_info
+                    if remaining == 0:
+                        table.add_row(
+                            n,
+                            f"{collected}/{target} collected",
+                            str(target),
+                            enrich_label,
+                            enrich_eta,
+                        )
+                    else:
+                        table.add_row(n, f"{collected}{pct}", str(target), str(remaining), eta)
+                    table.add_row(
+                        " ↳ papers: stars",
+                        enrich_label,
+                        str(getattr(crawler, "enrich_total", 0)),
+                        enrich_rem,
+                        enrich_eta,
+                    )
+                else:
+                    table.add_row(n, f"{collected}{pct}", str(target), str(remaining), eta)
             else:
                 table.add_row(n, str(collected), "— (24h window)", "—", "")
         console.print(table)

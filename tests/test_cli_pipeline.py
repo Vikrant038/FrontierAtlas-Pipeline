@@ -343,6 +343,74 @@ async def test_progress_monitor_renders_and_cancels(monkeypatch, capsys):
 
 
 @pytest.mark.asyncio
+async def test_progress_monitor_surfaces_papers_enrichment(monkeypatch, capsys):
+    # Active papers crawler: 1000/1000 collected, 412/605 stars enriched (68%), 1 token -> ETA ~7 min
+    class MockPapersCrawler:
+        collected = list(range(1000))
+        target_count = 1000
+        enriched_count = 412
+        enrich_total = 605
+        is_enriching = True
+        github_tokens = ["ghp_token1"]
+        _exhausted_github_tokens = set()
+
+    monkeypatch.setattr(cli, "console", cli.Console(width=120))
+    monkeypatch.setattr(cli, "_ACTIVE_CRAWLERS", {"papers": MockPapersCrawler()})
+    monitor_task, cache_task = cli._start_background_tasks(0.02, run_phase1=True, run_phase2=False)
+    await asyncio.sleep(0.08)
+    await cli._cancel_background_tasks(monitor_task, cache_task)
+    out = capsys.readouterr().out
+
+    assert "1000/1000 collected" in out
+    assert "enriching stars 412/605 (68%)" in out
+    assert "ETA ~7 min" in out
+    assert " ↳ papers: stars" in out
+    # While enrichment is in-flight, papers' overall status must NOT render as complete or ~0 min
+    assert "✅ Complete" not in out
+    assert "~0 min" not in out
+
+
+@pytest.mark.asyncio
+async def test_progress_monitor_papers_enriching_mid_collection(monkeypatch, capsys):
+    # Active papers crawler still collecting: 500/1000 collected, 100/200 stars enriched
+    class MockPapersCrawler:
+        collected = list(range(500))
+        target_count = 1000
+        enriched_count = 100
+        enrich_total = 200
+        is_enriching = True
+        github_tokens = ["ghp_token1"]
+        _exhausted_github_tokens = set()
+
+    monkeypatch.setattr(cli, "console", cli.Console(width=120))
+    monkeypatch.setattr(cli, "_ACTIVE_CRAWLERS", {"papers": MockPapersCrawler()})
+    monitor_task, cache_task = cli._start_background_tasks(0.02, run_phase1=True, run_phase2=False)
+    await asyncio.sleep(0.08)
+    await cli._cancel_background_tasks(monitor_task, cache_task)
+    out = capsys.readouterr().out
+
+    assert "500 (50%)" in out
+    assert "enriching stars 100/200 (50%)" in out
+    assert " ↳ papers: stars" in out
+
+
+def test_papers_enrichment_details_edge_cases():
+    assert cli._papers_enrichment_details(None) is None
+
+    class Inactive:
+        is_enriching = False
+
+    assert cli._papers_enrichment_details(Inactive()) is None
+
+    class ZeroTotal:
+        is_enriching = True
+        enrich_total = 0
+        enriched_count = 0
+
+    assert cli._papers_enrichment_details(ZeroTotal()) is None
+
+
+@pytest.mark.asyncio
 async def test_start_background_tasks_disabled_monitor(monkeypatch):
     monkeypatch.setattr(cli, "_ACTIVE_CRAWLERS", {})
     monitor_task, cache_task = cli._start_background_tasks(0.0, True, True)
