@@ -527,12 +527,14 @@ async def test_news_build_summary_llm_success_and_failure(monkeypatch):
 @pytest.mark.asyncio
 async def test_news_resolve_entry_date_full_text_inference(monkeypatch):
     crawler = NewsCrawler()
-    # Full-text relative recency expression: '3 hours ago' resolves to a fresh date
-    resolved = crawler._resolve_entry_date(
+    # Full-text relative recency expression: '3 hours ago' resolves to a fresh date,
+    # and the inference is flagged so exports can audit the 24h claim (F1).
+    resolved, date_inferred = crawler._resolve_entry_date(
         None, None, "", "Published 3 hours ago by the editorial team.",
         "https://example.com/x", "https://example.com/x", "title",
     )
     assert resolved is not None
+    assert date_inferred is True
     age = datetime.now(timezone.utc) - resolved
     assert 2.5 * 3600 < age.total_seconds() < 3.5 * 3600
 
@@ -541,7 +543,7 @@ async def test_news_resolve_entry_date_full_text_inference(monkeypatch):
     stale_html = '<meta property="article:published_time" content="2026-08-01T10:00:00Z">'
     assert crawler._resolve_entry_date(
         None, None, stale_html, "", "https://example.com/y", "https://example.com/y", "title2",
-    ) is None
+    ) == (None, False)
 
 
 @freeze_time("2026-09-04T12:00:00Z")

@@ -200,11 +200,12 @@ class NewsCrawler(AsyncBaseCrawler):
         link: str,
         norm_url: str,
         norm_title: str,
-    ) -> Optional[datetime]:
+    ) -> Tuple[Optional[datetime], bool]:
         """Resolve an entry's date through the freshness tiers: feed -> HTML metadata
-        -> content-text inference -> novelty stamping. Returns the resolved UTC date,
-        or None when the entry is strictly stale (source-stated date failed the 24h
-        gate, or a dateless URL seen in a previous run) and must be rolled back."""
+        -> content-text inference -> novelty stamping. Returns (resolved UTC date,
+        date_inferred); date is None when the entry is strictly stale (source-stated
+        date failed the 24h gate, or a dateless URL seen in a previous run) and the
+        dedup keys must be rolled back."""
         has_source_date = raw_feed_date is not None and str(raw_feed_date).strip() != ""
         inferred = False
         if not pub_date:
@@ -219,14 +220,14 @@ class NewsCrawler(AsyncBaseCrawler):
             if has_source_date or norm_url in self._prev_run_urls:
                 # Source-stated date failed the gate, or a dateless URL already seen:
                 # strictly stale - novelty stamping must not override a real date.
-                return None
+                return None, False
             # Truly dateless, never seen before: treat as new since last run.
             pub_date = datetime.now(timezone.utc)
             inferred = True
             logger.debug(f"Dateless entry treated as new-since-last-run: '{norm_title}'.")
         if inferred:
             logger.debug(f"Publication date inferred heuristically for '{norm_title}'.")
-        return pub_date
+        return pub_date, inferred
 
     async def _finalize_entry(
         self,
@@ -244,7 +245,7 @@ class NewsCrawler(AsyncBaseCrawler):
     ) -> Optional[NewsRecord]:
         """Resolve the entry's date, record coverage stats, build the summary, and
         construct the record. Rolls back dedup reservations on strictly-stale entries."""
-        pub_date = self._resolve_entry_date(
+        pub_date, date_inferred = self._resolve_entry_date(
             pub_date, raw_feed_date, raw_html, full_text, link, norm_url, norm_title
         )
         if pub_date is None:
@@ -259,7 +260,13 @@ class NewsCrawler(AsyncBaseCrawler):
             self.stats[source_name]["llm_summary" if is_llm_summary else "rss_fallback"] += 1
         return NewsRecord(
             source=SourceMetadata(name=source_name, url=link),
-            content=NewsContent(title=title, published_date=pub_date, summary=summary[:settings.news_summary_max_len] if summary else None, full_text=full_text or summary or title),
+            content=NewsContent(
+                title=title,
+                published_date=pub_date,
+                summary=summary[:settings.news_summary_max_len] if summary else None,
+                full_text=full_text or summary or title,
+                date_inferred=date_inferred,
+            ),
         )
 
     async def _process_entry(self, entry: Any, source_name: str) -> Optional[NewsRecord]:

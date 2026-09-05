@@ -358,7 +358,7 @@ def test_exports_produce_parseable_files_round_trip(tmp_path):
     assert wb["Research_Papers"].cell(row=2, column=3).value == "Scaling Laws for Neural Language Models"
     assert wb["Research_Papers"].cell(row=2, column=7).value == 1250
     assert wb["Jobs_24h"].cell(row=2, column=6).value == "Staff AI Research Scientist"
-    assert wb["Jobs_24h"].cell(row=2, column=8).value in (True, "True", "TRUE")
+    assert wb["Jobs_24h"].cell(row=2, column=9).value in (True, "True", "TRUE")
     assert wb["News_24h"].cell(row=2, column=5).value == "Anthropic announces Claude enterprise features"
     assert wb["Entity Mapping Log"].cell(row=2, column=1).value == "Anthropic, PBC"
     assert abs(float(wb["Entity Mapping Log"].cell(row=2, column=5).value) - 0.98) < 1e-4
@@ -374,3 +374,59 @@ def test_exports_produce_parseable_files_round_trip(tmp_path):
         assert len(rows) == 2, f"CSV {filename} must have header + 1 data row"
         assert rows[0] == expected_headers, f"CSV {filename} header mismatch"
 
+
+
+def test_date_inferred_flag_flows_to_exports():
+    # F1: inferred dates must be distinguishable from source-stated dates in
+    # both the Excel deliverable and the CSV files.
+    news = [
+        NewsRecord(
+            source=SourceMetadata(name="HN AI", url="https://example.com/a"),
+            content=NewsContent(
+                title="Inferring the date of this very article",
+                published_date=datetime.now(timezone.utc),
+                full_text="A sufficiently long article body without any stated date.",
+                date_inferred=True,
+            ),
+        ),
+        NewsRecord(
+            source=SourceMetadata(name="HN AI", url="https://example.com/b"),
+            content=NewsContent(
+                title="This one has a real feed date attached to it",
+                published_date=datetime.now(timezone.utc),
+                full_text="A sufficiently long article body with a stated date.",
+                date_inferred=False,
+            ),
+        ),
+    ]
+    jobs = [
+        JobRecord(
+            source=SourceMetadata(name="RemoteOK AI", url="https://remoteok.com/jobs/1"),
+            content=JobContent(
+                company="Acme", title="AI Engineer",
+                date=datetime.now(timezone.utc), is_remote=True,
+                role_family=RoleFamilyEnum.ENGINEERING, date_inferred=True,
+            ),
+        ),
+    ]
+    exporter = ExcelExporter()
+    csv_exporter = CSVExporter()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        xlsx = os.path.join(tmp_dir, "out.xlsx")
+        exporter.export(filepath=xlsx, news=news, jobs=jobs)
+        wb = openpyxl.load_workbook(xlsx)
+        # News: date_inferred column sits between published_date and summary
+        assert wb["News_24h"].cell(row=1, column=7).value == "content.date_inferred"
+        assert wb["News_24h"].cell(row=2, column=7).value is True
+        assert wb["News_24h"].cell(row=3, column=7).value is False
+        # Jobs: date_inferred column sits between date and is_remote
+        assert wb["Jobs_24h"].cell(row=1, column=8).value == "content.date_inferred"
+        assert wb["Jobs_24h"].cell(row=2, column=8).value is True
+
+        os.makedirs(os.path.join(tmp_dir, "csv"), exist_ok=True)
+        c = CSVExporter(output_dir=os.path.join(tmp_dir, "csv"))
+        c.export_all(news=news, jobs=jobs)
+        with open(os.path.join(tmp_dir, "csv", "news.csv"), newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        assert rows[0]["content.date_inferred"] in ("True", "true")
+        assert rows[1]["content.date_inferred"] in ("False", "false")

@@ -30,12 +30,12 @@ ENTITY_SPECS: Dict[str, Tuple[str, str, List[str]]] = {
     "jobs": (
         "Jobs_24h",
         "jobs.csv",
-        ["schemaVersion", "recordType", "source.name", "source.url", "content.company", "content.title", "content.date", "content.is_remote", "content.role_family", "collectedAt"],
+        ["schemaVersion", "recordType", "source.name", "source.url", "content.company", "content.title", "content.date", "content.date_inferred", "content.is_remote", "content.role_family", "collectedAt"],
     ),
     "news": (
         "News_24h",
         "news.csv",
-        ["schemaVersion", "recordType", "source.name", "source.url", "content.title", "content.published_date", "content.summary", "collectedAt"],
+        ["schemaVersion", "recordType", "source.name", "source.url", "content.title", "content.published_date", "content.date_inferred", "content.summary", "collectedAt"],
     ),
     "logs": (
         "Entity Mapping Log",

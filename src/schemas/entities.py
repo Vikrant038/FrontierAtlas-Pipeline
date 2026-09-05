@@ -172,6 +172,9 @@ class JobContent(BaseEntityModel):
     date: datetime = Field(..., description="Job posting date in UTC (must be <= 24h old)")
     is_remote: bool = Field(..., description="Whether role is remote")
     role_family: RoleFamilyEnum = Field(default=RoleFamilyEnum.OTHER)
+    # True when the date came from text inference or cross-run novelty stamping
+    # rather than an explicit source-provided date — keeps the 24h claim auditable.
+    date_inferred: bool = Field(default=False, description="Whether the posting date was inferred, not source-stated")
 
 
 class JobRecord(AuditedEntityRecord):
@@ -188,6 +191,7 @@ class JobRecord(AuditedEntityRecord):
             self.content.company,
             self.content.title,
             self.content.date.isoformat(),
+            self.content.date_inferred,
             self.content.is_remote,
             str(rf.value if hasattr(rf, "value") else rf),
             self.collectedAt.isoformat(),
@@ -202,6 +206,9 @@ class NewsContent(BaseEntityModel):
     published_date: datetime = Field(..., description="Publication date in UTC (must be <= 24h old)")
     summary: Optional[str] = Field(None, description="Concise summary or lead paragraph")
     full_text: str = Field(..., min_length=20, description="Full crawled article body text")
+    # True when the date came from HTML/text inference or cross-run novelty stamping
+    # rather than an explicit source-provided date — keeps the 24h claim auditable.
+    date_inferred: bool = Field(default=False, description="Whether the publication date was inferred, not source-stated")
 
 
 class NewsRecord(AuditedEntityRecord):
@@ -216,6 +223,7 @@ class NewsRecord(AuditedEntityRecord):
             self.source.url,
             self.content.title,
             self.content.published_date.isoformat(),
+            self.content.date_inferred,
             self.content.summary or (self.content.full_text[:200] + "..."),
             self.collectedAt.isoformat(),
         ]

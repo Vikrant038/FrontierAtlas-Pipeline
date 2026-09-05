@@ -51,17 +51,20 @@ class JobsCrawler(AsyncBaseCrawler):
     ) -> Optional[JobRecord]:
         # Freshness gate: strict posting date, then text inference, then cross-run novelty for dateless entries.
         pub_date = self.check_freshness(raw_date)
+        date_inferred = False
         if not pub_date and raw_date:
             # Explicit date was provided but failed 24h freshness check -> strictly stale!
             return None
         if not pub_date:
             pub_date = self.check_freshness(infer_content_freshness(title))
+            date_inferred = pub_date is not None
         if not pub_date:
             norm_url = (url or "").strip()
             if not norm_url or norm_url in self._prev_run_urls:
                 return None
             # Truly dateless posting never seen before: stamp collection time.
             pub_date = datetime.now(timezone.utc)
+            date_inferred = True
             self._novelty_keys.add(norm_url)
             logger.debug(f"Dateless posting treated as new-since-last-run: '{title}' ({source_name}).")
         canonical, _ = await entity_resolver.resolve_async(raw_name=raw_company, source_url=url, entity_type="STARTUP")
@@ -74,6 +77,7 @@ class JobsCrawler(AsyncBaseCrawler):
                 date=pub_date,
                 is_remote=remote,
                 role_family=role_family if role_family is not None else classify_role_family(title),
+                date_inferred=date_inferred,
             ),
         )
 
