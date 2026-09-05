@@ -352,7 +352,7 @@ class JobsCrawler(AsyncBaseCrawler):
         batches = await asyncio.gather(*[task for task, _ in board_tasks], return_exceptions=True)
         records = []
         freshness = {}
-        for (_, source_name), batch in zip(board_tasks, batches):
+        for (_, source_name), batch in zip(board_tasks, batches, strict=True):
             if isinstance(batch, Exception):
                 logger.warning(f"Job board fetch failed: {batch!r}")
                 freshness[source_name] = 0

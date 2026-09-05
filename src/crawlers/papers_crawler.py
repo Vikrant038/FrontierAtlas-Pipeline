@@ -238,7 +238,7 @@ class ResearchPapersCrawler(TargetedCrawler):
         per_cat = await asyncio.gather(
             *(self._query_cdn_category(cat, limit) for cat in cats), return_exceptions=True
         )
-        for cat, batch in zip(cats, per_cat):
+        for cat, batch in zip(cats, per_cat, strict=True):
             if isinstance(batch, Exception):
                 logger.warning(f"Arxiv CDN RSS failed for {cat}: {repr(batch)}")
                 continue

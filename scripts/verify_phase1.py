@@ -29,7 +29,7 @@ def get_sheet_records(ws) -> List[Dict[str, Any]]:
     if not rows or len(rows) < 2:
         return []
     headers = [str(h or "") for h in rows[0]]
-    return [dict(zip(headers, r)) for r in rows[1:]]
+    return [dict(zip(headers, r, strict=True)) for r in rows[1:]]
 
 
 def verify_phase1() -> None:

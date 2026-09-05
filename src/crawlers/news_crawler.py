@@ -330,7 +330,7 @@ class NewsCrawler(AsyncBaseCrawler):
         # Per-source freshness stamps: fresh_count = accepted records from each source.
         save_source_freshness(
             "news",
-            {src["name"]: len(src_records) for src, src_records in zip(self.sources, results) if isinstance(src_records, list)},
+            {src["name"]: len(src_records) for src, src_records in zip(self.sources, results, strict=True) if isinstance(src_records, list)},
         )
 
         # Post-gather title deduplication pass ensuring zero duplicate pairs

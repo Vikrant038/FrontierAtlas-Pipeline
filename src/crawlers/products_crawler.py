@@ -202,7 +202,7 @@ class ProductsCrawler(TargetedCrawler):
         # Fetch all source documents concurrently (independent downloads), then process each.
         fetched = await asyncio.gather(*(self.fetch(url) for _, url in sources), return_exceptions=True)
 
-        for (src_name, url), content in zip(sources, fetched):
+        for (src_name, url), content in zip(sources, fetched, strict=True):
             if self.is_full:
                 break
             if isinstance(content, Exception):

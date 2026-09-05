@@ -430,7 +430,8 @@ class TargetedCrawler(AsyncBaseCrawler):
         if self._wal_file is None and self.wal_enabled and self.wal_path:
             p = Path(self.wal_path)
             p.parent.mkdir(parents=True, exist_ok=True)
-            self._wal_file = open(p, "a", encoding="utf-8")
+            # Deliberate lifecycle: held open for streaming WAL appends; closed via close_wal().
+            self._wal_file = open(p, "a", encoding="utf-8")  # noqa: SIM115
         return self._wal_file
 
     def close_wal(self) -> None:

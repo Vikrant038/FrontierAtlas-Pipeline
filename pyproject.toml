@@ -1,0 +1,5 @@
+[tool.ruff]
+# SIM115 in tests: fixture-style open() for read-assertions on tmp files —
+# explicit close ordering is the point of some tests; per-file ignore keeps the gate clean.
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SIM115"]
