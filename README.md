@@ -120,7 +120,7 @@ Notes:
 ## Deliverables & Submission Links
 
 - **Google Sheets Output (Public Link)**: [https://docs.google.com/spreadsheets/d/1PzZqRtd5n40a5qlfycsrYd_9RVnHXcDhq5MRMhc1xzQ](https://docs.google.com/spreadsheets/d/1PzZqRtd5n40a5qlfycsrYd_9RVnHXcDhq5MRMhc1xzQ) (6 tabs: Startups, Products, Research_Papers, Jobs_24h, News_24h, Entity Mapping Log)
-- **Architecture Specification (PDF)**: [`architecture.pdf`](./architecture.pdf) (also in [`docs/architecture.pdf`](docs/architecture.pdf) / [`docs/architecture.md`](docs/architecture.md) — 3 pages, addressing Q1–Q4)
+- **Architecture Specification (PDF)**: [`docs/architecture.pdf`](docs/architecture.pdf) / [`docs/architecture.md`](docs/architecture.md) — 3 pages, addressing Q1–Q4)
 - **Local Deliverables (`exports/`)**:
   - `FrontierAtlas_Intelligence.xlsx` — 6 tabs styled Excel workbook
   - `{startups,products,research_papers,jobs,news}.csv` + `entity_mapping_log.csv`
