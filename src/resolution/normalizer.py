@@ -160,7 +160,11 @@ class EntityResolver:
             return self._disambiguation_cache[cache_key], cand_tuples
 
         if top_matches and 70.0 <= best_score < 90.0 and self.enable_llm_disambiguation:
+            # Reserve the budget slot synchronously (no await between check and
+            # increment): concurrent resolutions would otherwise all pass the check
+            # before any counter increment lands, overspending the LLM budget.
             if self._disambiguation_count < self.max_llm_disambiguations:
+                self._disambiguation_count += 1
                 return None, cand_tuples
             logger.warning(f"Disambiguation budget reached ({self.max_llm_disambiguations}); falling back to NEW_ENTITY.")
 
@@ -259,7 +263,7 @@ class EntityResolver:
         if det_result is not None:
             canonical, method, conf = det_result
         else:
-            self._disambiguation_count += 1
+            # Budget slot already reserved synchronously in _check_deterministic_tiers.
             canonical, method, conf = await self._disambiguate_with_llm(cleaned, top_matches, source_url)
 
         return self._record_resolution(

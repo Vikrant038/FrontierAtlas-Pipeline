@@ -135,11 +135,11 @@ async def test_escalate_camoufox_success_json_and_challenge(monkeypatch):
     assert "<html>ok</html>" in out
     assert AsyncBaseCrawler.escalation_successes == before + 1
 
-    # JSON content requested -> parsed dict
+    # JSON content requested -> fail fast without a browser launch (the browser
+    # tier renders HTML; JSON parsing of a page can never succeed).
     crawler2 = _ConcreteCrawler()
-    fake_mod.async_api.AsyncCamoufox = lambda *a, **k: FakeAsyncCamoufox(_content='{"a": 1}')
-    out = await crawler2._escalate_camoufox("https://example.com", as_json=True)
-    assert out == {"a": 1}
+    with pytest.raises(BotBlockedError, match="browser tier"):
+        await crawler2._escalate_camoufox("https://example.com", as_json=True)
 
     # Challenge page -> BotBlockedError (not counted as a success)
     crawler3 = _ConcreteCrawler()

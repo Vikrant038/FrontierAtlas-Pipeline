@@ -68,13 +68,19 @@ class ExcelExporter:
         }
 
         for key, (title, _, headers) in ENTITY_SPECS.items():
-            records = datasets.get(key)
-            if records is not None and len(records) > 0:
+            records = datasets.get(key) or []
+            if records:
                 if title in wb.sheetnames:
                     wb.remove(wb[title])
                 self._add_sheet(wb, title, headers, records)
-            elif title not in wb.sheetnames:
-                self._add_sheet(wb, title, headers, records or [])
+            elif title in wb.sheetnames:
+                # Empty dataset on a re-run must not retain stale rows from a prior
+                # run (e.g. --phase 1 passing news=[] after a full run wrote News_24h):
+                # replace the sheet with an empty headered one.
+                wb.remove(wb[title])
+                self._add_sheet(wb, title, headers, [])
+            else:
+                self._add_sheet(wb, title, headers, [])
 
         # Atomic save: write to a temp file and replace so a crash mid-save never
         # corrupts the deliverable workbook.

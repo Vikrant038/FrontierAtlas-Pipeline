@@ -5,9 +5,10 @@ SSRF URL sanitization, and curl-cffi TLS impersonation fallback.
 """
 
 import asyncio
-from datetime import datetime
 import json
+import zlib
 from abc import ABC, abstractmethod
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import feedparser
@@ -184,24 +185,27 @@ class AsyncBaseCrawler(ABC):
         async with self.semaphore:
             try:
                 resp = await client.get(safe_url, params=params, headers=req_headers, timeout=req_timeout)
-                if resp.status_code == 403:
-                    try:
-                        body_hint = resp.text[:200]
-                    except Exception:
-                        body_hint = ""
-                    raise BotBlockedError(f"HTTP 403 for {safe_url}: {body_hint}")
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    if resp.status_code == 429:
-                        await _handle_retry_after(resp.headers, safe_url)
-                    if not allow_retry:
-                        raise httpx.HTTPStatusError(f"HTTP {resp.status_code}", request=resp.request, response=resp)
-                    raise TransientNetworkError(f"HTTP {resp.status_code}")
-                resp.raise_for_status()
-                return resp
             except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError) as net_err:
                 if not allow_retry:
                     raise net_err
                 raise TransientNetworkError(repr(net_err)) from net_err
+
+        # Handle status codes OUTSIDE the semaphore slot: honoring a long Retry-After
+        # while holding a concurrency slot stalls every other request under 429 storms.
+        if resp.status_code == 403:
+            try:
+                body_hint = resp.text[:200]
+            except Exception:
+                body_hint = ""
+            raise BotBlockedError(f"HTTP 403 for {safe_url}: {body_hint}")
+        if resp.status_code in (429, 500, 502, 503, 504):
+            if resp.status_code == 429:
+                await _handle_retry_after(resp.headers, safe_url)
+            if not allow_retry:
+                raise httpx.HTTPStatusError(f"HTTP {resp.status_code}", request=resp.request, response=resp)
+            raise TransientNetworkError(f"HTTP {resp.status_code}")
+        resp.raise_for_status()
+        return resp
 
     async def _escalate_camoufox(
         self,
@@ -211,6 +215,13 @@ class AsyncBaseCrawler(ABC):
     ) -> Any:
         """Tier 3 fallback: Launch hardened headless browser to bypass Cloudflare/bot challenges."""
         safe_url = await asyncio.to_thread(validate_url_safe, url)
+        if as_json:
+            # Camoufox renders HTML (page.content()); JSON parsing of a browser page
+            # always fails. A browser launch here would burn ~45s for a guaranteed
+            # JSONDecodeError, so fail fast instead.
+            raise BotBlockedError(
+                f"Anti-bot block on {safe_url}: JSON APIs cannot use the browser tier (HTML-only response)."
+            )
         browser_timeout = float(timeout or 45.0)
         logger.info(f"Escalating to Tier 3 Camoufox headless browser for {safe_url} (timeout={browser_timeout}s)")
         try:
@@ -226,7 +237,7 @@ class AsyncBaseCrawler(ABC):
             if _looks_like_challenge(content):
                 raise BotBlockedError(f"Bot challenge page returned by Camoufox for {safe_url}")
             AsyncBaseCrawler.escalation_successes += 1
-            return json.loads(content) if as_json else content
+            return content
         except ImportError as imp_err:
             logger.error(f"Camoufox not installed: {imp_err}")
             raise BotBlockedError(f"Anti-bot block on {safe_url}, and Camoufox is not installed.") from imp_err
@@ -387,7 +398,10 @@ class TargetedCrawler(AsyncBaseCrawler):
             return None
         if len(available) == 1:
             return available[0]
-        return available[hash(key or "default") % len(available)]
+        # crc32 (not builtin hash): PYTHONHASHSEED randomizes hash() per process,
+        # which would reshuffle token↔repo pairing on every run and break any
+        # per-key quota telemetry correlation.
+        return available[zlib.crc32((key or "default").encode("utf-8")) % len(available)]
 
     def _get_wal_file(self):
         """Lazily initialize and open append-only WAL file."""

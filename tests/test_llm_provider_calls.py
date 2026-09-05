@@ -133,8 +133,8 @@ def test_pick_key_branches():
     assert pick([], "salt") is None
     assert pick(["only"], "salt") == "only"
     pool = [f"k{i}" for i in range(4)]
-    # Deterministic hash selection and stable for a given salt
-    assert pick(pool, "prompt-a") == pool[hash("prompt-a") % 4]
+    # Deterministic selection and stable for a given salt
+    assert pick(pool, "prompt-a") == pool[fc._stable_hash("prompt-a") % 4]
     assert pick(pool, "prompt-a") == pick(pool, "prompt-a")
 
 

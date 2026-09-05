@@ -218,6 +218,12 @@ class ProductsCrawler(TargetedCrawler):
                 for name, item_url, desc in items:
                     if not name or "#" in item_url or self.is_full:
                         continue
+                    if name.strip().lower() in self.seen_keys:
+                        # Seen in this run or recovered from WAL: skipping here avoids
+                        # paying an LLM pricing classification for a record we discard.
+                        # Membership read only — is_seen() would REGISTER the key and
+                        # make the later add() reject the very record we keep.
+                        continue
                     candidates.append((name, item_url, desc))
                     if len(candidates) >= self.remaining:
                         break

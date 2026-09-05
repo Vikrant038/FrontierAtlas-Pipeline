@@ -10,7 +10,12 @@ import respx
 import httpx
 
 from src.crawlers.products_crawler import ProductsCrawler
-from src.schemas.entities import PricingModelEnum
+from src.schemas.entities import (
+    PricingModelEnum,
+    ProductContent,
+    ProductRecord,
+    SourceMetadata,
+)
 
 
 def test_products_crawler_pricing_classification():
@@ -305,3 +310,42 @@ async def test_products_crawl_concurrent_sources_and_errors(monkeypatch):
 
     assert len(records) == 2
     assert {r.content.productName for r in records} == {"ToolA", "ToolB"}
+
+
+@pytest.mark.asyncio
+async def test_crawl_skips_llm_classification_for_wal_recovered_names():
+    # Regression (M6): names already recovered from WAL (registered in seen_keys) must be
+    # filtered from candidates BEFORE processing, so the pricing LLM is not re-invoked
+    # for records that add() would only discard.
+    crawler = ProductsCrawler(target_count=5)
+    recovered = ProductRecord(
+        source=SourceMetadata(name="S", url="https://toola.io"),
+        content=ProductContent(
+            startupName="ToolA", productName="ToolA",
+            productUrl="https://toola.io", pricingModel=PricingModelEnum.FREE,
+        ),
+    )
+    crawler.add("ToolA", recovered)  # WAL recovery registers the key and the record
+    assert crawler.seen_keys == {"tool a".replace(" ", "")}  # sanity: registered lowercased
+
+    classify_calls = {"n": 0}
+
+    async def _counting_classify(name, url, desc):
+        classify_calls["n"] += 1
+        return PricingModelEnum.FREEMIUM
+
+    async def fake_fetch(url, **kwargs):
+        return (
+            "- [ToolA](https://toola.io) First product description here.\n"
+            "- [ToolB](https://toolb.io) Second product description here."
+        )
+
+    crawler.fetch = fake_fetch  # type: ignore[method-assign]
+    crawler.classify_pricing_async = _counting_classify  # type: ignore[method-assign]
+
+    records = await crawler.crawl()
+    await crawler.close()
+
+    names = {r.content.productName for r in records}
+    assert names == {"ToolA", "ToolB"}  # recovered record retained + ToolB newly collected
+    assert classify_calls["n"] == 1  # only ToolB paid the LLM; ToolA was skipped

@@ -71,6 +71,36 @@ def test_excel_exporter_creates_6_tabs():
         assert wb.sheetnames == expected_sheets
 
 
+def test_excel_exporter_replaces_stale_tab_on_rerun_with_empty_dataset():
+    # Arrange: first run writes a populated News_24h tab; second run exports with
+    # news=[] (e.g. --phase 1). The stale rows must NOT survive the re-export.
+    exporter = ExcelExporter()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        output_file = os.path.join(tmp_dir, "test_output.xlsx")
+        news = [
+            NewsRecord(
+                source=SourceMetadata(name="TechCrunch AI", url="https://techcrunch.com/a"),
+                content=NewsContent(
+                    title="Anthropic announces Claude enterprise features",
+                    published_date=datetime.now(timezone.utc),
+                    full_text="Some sufficiently long article body text for the schema.",
+                ),
+            )
+        ]
+        exporter.export(filepath=output_file, news=news)
+        wb = openpyxl.load_workbook(output_file)
+        assert wb["News_24h"].max_row == 2
+
+        # Act: re-export same file, no news this run
+        exporter.export(filepath=output_file, news=[])
+
+        # Assert: News_24h exists but contains only the header row
+        wb2 = openpyxl.load_workbook(output_file)
+        assert "News_24h" in wb2.sheetnames
+        assert wb2["News_24h"].max_row == 1
+        assert wb2["News_24h"].cell(row=2, column=1).value is None
+
+
 def test_knowledge_graph_builder_links_startup_to_product():
     # Arrange
     builder = KnowledgeGraphBuilder()

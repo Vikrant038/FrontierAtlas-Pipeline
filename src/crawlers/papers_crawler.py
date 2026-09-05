@@ -373,14 +373,31 @@ class ResearchPapersCrawler(TargetedCrawler):
                 logger.debug(f"Enrichment task failed: {t.exception()!r}")
         return list(pending)
 
+    async def _enrich_recovered(self, enrich_tasks: List[asyncio.Task]) -> List[asyncio.Task]:
+        """Queue WAL-recovered papers (stars=None, repo known) for background enrichment.
+        Without this, a resumed run ships recovered papers with stars=N/A forever: the
+        fetch loop skips already-seen URLs and never re-derives their repo paths."""
+        batch: List[Tuple[ResearchPaperRecord, str]] = []
+        prefix = "https://github.com/"
+        for rec in self.collected:
+            if rec.content.github_stars is not None:
+                continue
+            gh_url = rec.content.github_url or ""
+            if gh_url.startswith(prefix):
+                repo_path = gh_url[len(prefix):].rstrip("/")
+                if repo_path and "/" in repo_path:
+                    batch.append((rec, repo_path))
+        return await self._spawn_enrichment(batch, enrich_tasks)
+
     async def crawl(self) -> List[ResearchPaperRecord]:
         """Execute concurrent papers acquisition with decoupled ingestion and enrichment."""
         logger.info(f"Starting ResearchPapersCrawler (Target: {self.target_count} papers)...")
         recovered = self.recover_from_wal(model_cls=ResearchPaperRecord)
+        enrich_tasks: List[asyncio.Task] = []
         if recovered:
             logger.info(f"Resumed {recovered} papers from WAL; continuing toward {self.target_count}.")
+            enrich_tasks = await self._enrich_recovered(enrich_tasks)
         offset = 0
-        enrich_tasks: List[asyncio.Task] = []
 
         while not self.is_full:
             needed = min(settings.papers_batch_size, self.remaining)
@@ -418,7 +435,15 @@ class ResearchPapersCrawler(TargetedCrawler):
 
         # 3. Finalize all pending background star enrichments before returning
         if enrich_tasks:
-            await asyncio.gather(*enrich_tasks, return_exceptions=True)
+            outcomes = await asyncio.gather(*enrich_tasks, return_exceptions=True)
+            failed = [o for o in outcomes if isinstance(o, Exception)]
+            if failed:
+                # Surface systematic enrichment failure (e.g. bad token pool) instead of
+                # letting it vanish as per-task debug noise inside the gather result.
+                logger.warning(
+                    f"{len(failed)}/{len(outcomes)} background enrichment batches failed: "
+                    f"{failed[0]!r}"
+                )
 
         self.reset_wal_if_complete()
         logger.info(f"Completed ResearchPapersCrawler: {len(self.collected)} papers collected.")

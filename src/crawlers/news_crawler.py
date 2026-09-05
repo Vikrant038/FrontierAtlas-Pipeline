@@ -338,15 +338,15 @@ class NewsCrawler(AsyncBaseCrawler):
             final_seen_titles.append(nt)
             deduped_records.append(rec)
 
-        # Log full-text coverage warnings and stats per source
+        # Log full-text coverage stats per source (informational, not a warning condition)
         coverage_summary = ", ".join(
             f"{s}: {st['full_text']}/{st['total']} full-text"
             for s, st in self.stats.items() if st["total"] > 0
         )
-        logger.warning(f"News full-text coverage summary: {coverage_summary}")
+        logger.info(f"News full-text coverage summary: {coverage_summary}")
         for src_name, st in self.stats.items():
             if st["total"] > 0:
-                logger.warning(f"Full-text coverage: {src_name}: {st['full_text']}/{st['total']} full-text")
+                logger.info(f"Full-text coverage: {src_name}: {st['full_text']}/{st['total']} full-text")
 
         # Persist summary telemetry for audit and verification
         try:

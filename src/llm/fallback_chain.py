@@ -17,6 +17,7 @@ import asyncio
 import json
 import re
 import time
+import zlib
 from typing import Any, Dict, List, Optional, Type, TypeVar
 from pydantic import BaseModel, ValidationError
 
@@ -116,6 +117,12 @@ def _classify_provider_error(exc: Exception) -> Exception:
     return LLMTransientError(str(exc))
 
 
+def _stable_hash(salt: str) -> int:
+    """Process-independent hash: PYTHONHASHSEED randomizes builtin hash() per process,
+    which would reshuffle key-pool selection on every restart. crc32 is stable."""
+    return zlib.crc32(salt.encode("utf-8"))
+
+
 class MultiTierLLMEngine:
     """Production-grade LLM orchestrator with multi-provider failover and concurrency limits."""
 
@@ -149,7 +156,7 @@ class MultiTierLLMEngine:
             return None
         if len(keys) == 1:
             return keys[0]
-        return keys[hash(salt) % len(keys)]
+        return keys[_stable_hash(salt) % len(keys)]
 
     async def _acquire_tier_slot(self, provider_id: str, keys: List[str], salt: str) -> Optional[str]:
         """Acquire a rate-limit slot for a tier. With a key pool, try each key's own
@@ -159,7 +166,7 @@ class MultiTierLLMEngine:
         if not keys:
             await rate_limiter.acquire(provider_id, max_wait=0.0)
             return None
-        start = hash(salt) % len(keys)
+        start = _stable_hash(salt) % len(keys)
         for offset in range(len(keys)):
             key = keys[(start + offset) % len(keys)]
             try:
