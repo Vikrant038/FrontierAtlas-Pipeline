@@ -93,3 +93,9 @@ Thumbs.db
 *.swo
 PHASE_ARCHITECTURE.md
 architecture.pdf
+
+# ============================================================================
+# AIOrbit Pipeline Data & Archive
+# ============================================================================
+aiorbit/_archive/
+aiorbit/exports_aiorbit/

@@ -1,0 +1,484 @@
+<USER_REQUEST>
+MCP Data Extraction & Curation Guidelines
+
+Objective
+
+We are not trying to collect every MCP available on the internet.
+
+AIOrbit should contain a curated database of the best, most useful and currently active MCP Servers and MCP Clients.
+
+There may be 100,000+ MCP listings across different websites. Our job is to discover them broadly and then filter aggressively to identify the best ~10,000.
+
+Quality > Quantity. Do not add an MCP just because you found it.
+
+1. Where to Find MCPs — Follow This Order
+
+Do not randomly search Google and collect whatever appears first.
+
+Priority 1 — Creati.ai
+
+Start with these two sources:
+
+- MCP Servers: https://creati.ai/mcp/server/
+- MCP Clients: https://creati.ai/mcp/client/
+
+Go through these systematically and identify the best/relevant MCPs first.
+
+Priority 2 — Other quality MCP sources
+
+After Creati.ai, use:
+
+1. Official MCP Registry
+2. GitHub
+3. Glama
+4. Smithery
+5. Official company/product websites
+6. Docker MCP Registry
+7. Other established AI/MCP directories
+8. Product Hunt / AI launch sources
+9. Credible technology publications
+
+Important
+
+A directory is a discovery source, not proof that an MCP is good.
+
+Use:
+
+Discovery Source → Official Website/GitHub → Verify → Add
+
+Never:
+
+Directory → Copy → Add
+
+2. What Should Be Added?
+
+Add an MCP when it is:
+
+- Currently available
+- Actually useful
+- Maintained/active
+- Technically credible
+- Relevant to real users
+- Clearly identifiable
+- Not a duplicate
+- Worth recommending to an AIOrbit user
+
+Prioritize MCPs that have strong utility in areas such as:
+
+- Developer / Coding
+- Browser automation
+- Search & Research
+- Databases
+- Cloud / DevOps
+- Productivity
+- Business automation
+- CRM / Sales
+- Marketing
+- Finance
+- Analytics
+- Knowledge management
+- Communication
+- File systems
+- AI/ML
+- Design
+- Security
+- Agent workflows
+
+Strong preference
+
+Give priority to:
+
+Recently launched + actively maintained + useful + growing/adopted MCPs
+
+But don't reject an older MCP simply because it is old. If an older MCP is still highly useful, actively maintained and widely used, it should remain a strong candidate.
+
+3. What Should NOT Be Added?
+
+Reject immediately if you find:
+
+- Dead/shut-down MCP
+- Broken/inaccessible MCP
+- Abandoned project
+- Duplicate listing
+- Spam
+- Fake/unverifiable project
+- Demo/tutorial/example repository
+- Extremely low-quality implementation
+- MCP with no meaningful functionality
+- Outdated listing where the actual product no longer exists
+- Product incorrectly classified as an MCP
+- Simple AI tool that does not actually provide MCP functionality
+
+Do not fill the database just to increase numbers.
+
+If you review 1,000 candidates and only 300 are genuinely good, submit 300.
+
+4. Most Important: Verify Before Adding
+
+For every MCP you discover:
+
+Step 1 — Find it
+
+Example:
+
+Creati.ai → MCP Server → Candidate
+
+Step 2 — Open the official source
+
+Find:
+
+- Official website
+- Official GitHub repository
+- Official documentation
+
+Step 3 — Verify
+
+Confirm:
+
+- Does the MCP actually exist?
+- Is it currently available?
+- What does it actually do?
+- Is it still maintained?
+- Is the information in the directory accurate?
+- Is the MCP Server or Client classification correct?
+
+Step 4 — Enrich
+
+Only after verification, collect the required data.
+
+The official website/GitHub should be treated as the primary source for product facts.
+
+5. How to Decide Which MCP Is Better?
+
+When you find multiple MCPs doing similar things, do not add all of them automatically.
+
+Compare them.
+
+For example, suppose you find 20 MCPs for database management.
+
+Ask:
+
+Question
+
+What to look for
+
+Utility
+
+Does it solve a real problem?
+
+Quality
+
+Does it work well and provide useful capabilities?
+
+Activity
+
+Is it recently maintained?
+
+Adoption
+
+Users, downloads, GitHub activity, etc.
+
+Documentation
+
+Is setup/use clearly explained?
+
+Reliability
+
+Does it appear stable and functional?
+
+Differentiation
+
+Is there a reason to use it over alternatives?
+
+Recency
+
+Is it new or actively improving?
+
+Simple ranking logic
+
+Excellent MCP
+
+→ Add with high priority.
+
+Good MCP
+
+→ Add if it provides meaningful value or improves category coverage.
+
+Average MCP
+
+→ Usually skip if better alternatives exist.
+
+Poor MCP
+
+→ Reject.
+
+6. Ranking Score — Use This Simple 100-Point System
+
+Interns don't need complicated calculations. Use this practical scoring:
+
+Factor
+
+Points
+
+Usefulness / Real-world value
+
+30
+
+Quality & functionality
+
+25
+
+Activity / Maintenance
+
+15
+
+Adoption / Traction
+
+10
+
+Documentation / Ease of use
+
+5
+
+Recency / Momentum
+
+5
+
+Reliability / Trust
+
+5
+
+Differentiation
+
+5
+
+Total
+
+100
+
+Interpretation
+
+90–100 → Excellent
+
+Strongly prioritize.
+
+80–89 → Very Good
+
+Include.
+
+70–79 → Good
+
+Include selectively.
+
+60–69 → Average
+
+Usually skip if better alternatives exist.
+
+Below 60 → Reject.
+
+Important
+
+Do not give a high score simply because an MCP has many GitHub stars.
+
+Stars, downloads and popularity are signals, not proof of quality.
+
+7. Duplicate Handling — VERY IMPORTANT
+
+The same MCP can appear on:
+
+- Creati.ai
+- GitHub
+- Official MCP Registry
+- Glama
+- Smithery
+- Docker
+- Other directories
+
+These should become ONE AIOrbit record, not multiple records.
+
+Use these to identify duplicates:
+
+1. Official URL
+
+2. GitHub repository
+
+3. Company/creator
+
+4. Product name
+
+5. Package/server identifier
+
+Example
+
+If:
+
+"X MCP"
+
+is found on Creati.ai, Glama, Smithery and GitHub, but all point to the same official project:
+
+→ Create ONE MCP entry.
+
+Use the other sources only for:
+
+- Verification
+- Additional metadata
+- Popularity/activity signals
+
+8. When Two MCPs Look Similar
+
+Do not assume they are duplicates.
+
+Check whether they are:
+
+Same product
+
+Same company + same repository/product → Duplicate
+
+Different implementations
+
+Different companies/repositories providing similar functionality → Separate MCPs
+
+Example:
+
+MCP A — PostgreSQL
+
+MCP B — PostgreSQL
+
+If they are genuinely different projects, they can both exist.
+
+But then compare their quality.
+
+If:
+
+- A = 92
+- B = 64
+
+→ A should be prioritized.
+
+The objective is not to have 50 versions of the same capability just because they exist.
+
+9. Data to Extract
+
+For every MCP that passes the quality check, collect:
+
+Basic
+
+- MCP Name
+- Type — Server / Client
+- Official Website
+- Official/GitHub URL
+- Description
+- Category
+- Subcategory
+- Company / Creator
+- Launch Date
+- Last Updated
+- Active / Inactive
+
+Product
+
+- Primary Use Case
+- Key Capabilities
+- Integrations
+- Supported Platforms
+- Supported AI Clients
+- Supported Models, where applicable
+- API Availability
+- Pricing
+- Free / Freemium / Paid
+- Open Source / Closed Source
+- License, if applicable
+
+Technical
+
+- GitHub Repository
+- GitHub Stars
+- GitHub activity
+- Package/download information where available
+- Documentation URL
+- MCP transport/support information where relevant
+
+Links
+
+- Official website
+- GitHub
+- Documentation
+- Official social accounts
+- Other important official links
+
+Internal AIOrbit fields
+
+- Discovery Source
+- Verification Source
+- Quality Score
+- Activity Score
+- Overall Score
+- Last Verified Date
+- Notes / Reason for inclusion
+
+10. Do Not Collect Random Personal Data
+
+Collect relevant public product/company information.
+
+If an individual developer is the creator, a public professional identity such as their GitHub username may be useful for attribution.
+
+But do not collect unnecessary personal information such as:
+
+- Personal phone numbers
+- Home address
+- Private email
+- Family information
+- Personal IDs
+- Private social accounts
+- Financial information
+- Any unrelated personal information
+
+Rule:
+
+If the information does not help identify, verify, rank or understand the MCP, don't collect it.
+
+11. Final Rule for Interns
+
+Before submitting an MCP, ask yourself these 5 questions:
+
+1. Is it real?
+
+Can I verify it from an official source?
+
+2. Is it active?
+
+Does the product/repository still work and appear maintained?
+
+3. Is it useful?
+
+Would an AIOrbit user actually benefit from it?
+
+4. Is it good?
+
+Is it better or at least competitive with other MCPs doing the same thing?
+
+5. Is it already in AIOrbit?
+
+Check the canonical URL, GitHub repository, company and product name for duplicates.
+
+If the answer to these questions is yes, add it.
+
+If not, skip it or investigate further.
+
+The AIOrbit MCP Rule
+
+Don't collect everything you find. Find everything worth considering, then select only the best.
+
+Creati.ai first → Quality sources next → Official verification → Score → Deduplicate → Curate → Add to AIOrbit.
+
+Target: ~10,000 excellent MCPs, not an unlimited MCP dump.
+
+So this is the next task that we eventually have to do. So for this, what I'm eventually thinking is like first understand the whole architecture, the whole view of it, what we have to do and what are the things and how we have to do. We will be just using uh this uh uh we will create a folder in it that will Will be using the second stage of the uh project, and in that we will be uh pre-editing in the Git. We will not commit it anywhere anywhere else. It will be just staying in this as we have to only give the sheet itself, and based on the rules that it is currently. having these are the things we have to follow for it. And what I'm thinking is to scrape the data from Camu Fox like you will be using the browser chemu fox and scrape the data from it and then do all the stuff that we eventually need. The way that we eventually need and the order priority. So how we can Uh how we can do that and we eventually need to get 1k data at the last of the funnel. As our previous demo project is completed, this is the second thing that we have to eventually do it and how we can do it, explain without creating anything else.
+We are in plan mode.
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-09-11T14:03:40+05:30.
+</ADDITIONAL_METADATA>
+<USER_SETTINGS_CHANGE>
+The user changed setting `Model Selection` from Claude Sonnet 4.6 (Thinking) to Gemini 3.8 Flash (High). No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.
+</USER_SETTINGS_CHANGE>
